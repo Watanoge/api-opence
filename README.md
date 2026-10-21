@@ -45,4 +45,15 @@ profile name the game sends with each score.
 | PUT | `/daily/:day` | a challenge set by hand (`x-admin-code: HALO_ADMIN_CODE`), for a day with no scores yet |
 
 Answers are `{ "data": ... }`, or `{ "error": { "type": ... } }` with a
-status of 4xx or 5xx.
+status of 4xx or 5xx. `database` (503) means MongoDB cannot be reached
+(`MONGODB_URI`); `GET /status` says `"database": "ok"` or `"unavailable"`.
+
+## CORS
+
+Only the web build is subject to it: the desktop, Android, Switch and PS5
+builds make their own HTTPS requests. Every origin is allowed (the page's
+own is reflected, `null` for a file's page too), as nothing rides on cookies;
+every answer carries the headers, errors included, and a preflight (the
+`x-halo-key` header asks for one) is remembered for a day. A "CORS error" in
+the browser therefore means the answer did not come from this server (a
+proxy's error page, or the server down), not that the origin was refused.

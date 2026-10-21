@@ -312,11 +312,18 @@ async function getChallengeHistory(query, key) {
     ]).toArray() : [];
     const byDay = Object.fromEntries(totals.map((row) => [row._id, row]));
 
+    // (the key's best of each day, and its place on the day's leaderboard)
     let mine = {};
     const parsedKey = parseKey(key);
     if (parsedKey && days.length) {
         const rows = await scores.find({ player: hashKey(parsedKey), day: { $in: days } }).toArray();
-        mine = Object.fromEntries(rows.map((row) => [row.day, row]));
+        for (const row of rows) {
+            const ahead = await scores.countDocuments({ day: row.day, $or: [
+                { score: { $gt: row.score } },
+                { score: row.score, seconds: { $lt: row.seconds } },
+            ] });
+            mine[row.day] = { ...row, rank: ahead + 1 };
+        }
     }
 
     const now = new Date();
@@ -335,7 +342,11 @@ async function getChallengeHistory(query, key) {
             players: byDay[challenge.day]?.players ?? 0,
             bestScore: byDay[challenge.day]?.bestScore ?? null,
             bestName: byDay[challenge.day]?.bestName ?? null,
-            mine: mine[challenge.day] ? { score: mine[challenge.day].score, seconds: mine[challenge.day].seconds } : null,
+            mine: mine[challenge.day] ? {
+                score: mine[challenge.day].score,
+                seconds: mine[challenge.day].seconds,
+                rank: mine[challenge.day].rank,
+            } : null,
         })),
     };
 }

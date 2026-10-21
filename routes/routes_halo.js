@@ -24,6 +24,7 @@ const {
     submitChallengeScore,
     setChallenge,
 } = require('../database/halo_sql');
+const { databaseReachable, isDatabaseError } = require('../database/db');
 
 const router = express.Router();
 
@@ -42,12 +43,18 @@ function respond(name, handler) {
             return res.status(200).json({ data: result });
         } catch (err) {
             console.error(`${name}:`, err);
+            // (the database down is the server's trouble to say: the game
+            // offers another server, or offline)
+            if (isDatabaseError(err)) return res.status(503).json({ error: { type: 'database' } });
             return res.status(500).json({ error: { type: 'internal' } });
         }
     };
 }
 
-router.get('/status', (_req, res) => res.status(200).json({ data: getStatus() }));
+router.get('/status', async (_req, res) => {
+    const database = await databaseReachable();
+    res.status(database ? 200 : 503).json({ data: { ...getStatus(), database: database ? 'ok' : 'unavailable' } });
+});
 
 router.post('/levels/scores', respond('POST /levels/scores',
     (req) => submitLevelScore(playerKey(req), req.body)));

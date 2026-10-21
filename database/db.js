@@ -10,7 +10,8 @@ function client() {
     if (!clientPromise) {
         const uri = process.env.MONGODB_URI;
         if (!uri) throw new Error('MONGODB_URI is not set');
-        clientPromise = new MongoClient(uri).connect().catch((error) => {
+        // (a server down fails a request in seconds, not the driver's 30)
+        clientPromise = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 }).connect().catch((error) => {
             clientPromise = null;
             throw error;
         });
@@ -23,4 +24,21 @@ async function collection(name) {
     return connected.db(process.env.MONGODB_DBNAME || 'opence').collection(name);
 }
 
-module.exports = { collection };
+/** whether the database answers, for /status */
+async function databaseReachable() {
+    try {
+        const connected = await client();
+        await connected.db(process.env.MONGODB_DBNAME || 'opence').command({ ping: 1 });
+        return true;
+    } catch (error) {
+        console.error('database unreachable:', error.message);
+        return false;
+    }
+}
+
+/** an error of the database's (unreachable, refused, not configured) */
+function isDatabaseError(error) {
+    return /^Mongo/.test(error?.name || '') || /MONGODB_URI/.test(error?.message || '');
+}
+
+module.exports = { collection, databaseReachable, isDatabaseError };
