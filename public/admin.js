@@ -56,7 +56,6 @@ const time = (seconds) => seconds == null ? '–' :
 const number = (value) => value == null ? '–' : Number(value).toLocaleString();
 const date = (value) => value ? new Date(value).toLocaleString() : '–';
 const skullName = (key) => key.replace(/_/g, ' ');
-const whenBadge = (when) => h('span', { class: `badge ${when}` }, when);
 
 function toast(text) {
   const node = h('div', { class: 'toast', role: 'status' }, text);
@@ -267,14 +266,11 @@ async function daysView(params) {
         { label: 'Day', value: (row) => h('span', {},
           h('span', { class: 'weekday' }, new Date(`${row.day}T12:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short' })),
           h('span', { class: 'mono' }, row.day)) },
-        // (today: its row's highlight alone)
-        { label: '', value: (row) => row.when === 'today' ? '' : whenBadge(row.when) },
         { label: 'Level', value: (row) => row.set ? `${row.levelTitle} (${row.level})` : h('span', { class: 'muted' }, row.when === 'future' ? 'not set yet' : 'never asked for') },
         { label: 'Difficulty', value: (row) => row.set ? DIFFICULTY_NAMES[row.difficulty] : '' },
         { label: 'Skulls', wrap: true, value: (row) => row.set ? (row.skulls.map(skullName).join(', ') || 'none') : '' },
         { label: 'Players', num: true, value: (row) => row.players || '' },
         { label: 'Best', value: (row) => row.bestScore != null ? `${number(row.bestScore)} · ${row.bestName}` : '' },
-        { label: '', value: (row) => row.byHand ? h('span', { class: 'badge', title: 'Changed or made here' }, 'changed') : '' },
       ], days, { onRow: (row) => { location.hash = `#/days/${row.day}`; }, rowClass: (row) => row.day === today ? 'today' : '' }),
       pager));
 }

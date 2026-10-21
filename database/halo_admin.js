@@ -116,7 +116,6 @@ async function listDays(query) {
             day,
             when: when(day, now),
             set: Boolean(challenge),
-            byHand: Boolean(challenge?.updatedAt),
             level: challenge?.level ?? null,
             levelTitle: challenge?.levelTitle ?? null,
             difficulty: challenge?.difficulty ?? null,
