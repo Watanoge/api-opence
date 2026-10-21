@@ -243,40 +243,105 @@ async function overviewView() {
 async function daysView(params) {
   setTab('days');
   loading();
-  // (four weeks: the two before the day asked for, and the two after)
-  const center = params.get('around') || meta.today;
-  const from = shiftDay(center, -14);
-  const to = shiftDay(center, 14);
+  // (the week, Monday to Sunday, of the day asked for)
+  const from = weekStart(params.get('around') || meta.today);
+  const to = shiftDay(from, 6);
   const result = await api('GET', `/days?from=${from}&to=${to}`);
   if (!result.ok) return failed(result);
-  const { days, today } = result.data;
-  const jump = h('input', { type: 'date', value: center });
+  const { today } = result.data;
+  const days = [...result.data.days].reverse();
+  const thisWeek = weekStart(meta.today);
+  const around = (day) => () => { location.hash = day === thisWeek ? '#/days' : `#/days?around=${day}`; };
+  const shortDay = (day) => new Date(`${day}T12:00:00Z`).toLocaleDateString(undefined,
+    { timeZone: 'UTC', month: 'short', day: 'numeric' });
+  const pager = h('div', { class: 'pager' },
+    h('button', { onclick: around(shiftDay(from, -7)) }, '← Earlier'),
+    h('span', { class: 'muted small' }, `${shortDay(from)} – ${shortDay(to)}`),
+    from === thisWeek ? null : h('button', { class: 'small', onclick: around(thisWeek) }, 'This week'),
+    h('div', { class: 'spacer' }),
+    h('button', { onclick: around(shiftDay(from, 7)) }, 'Later →'));
   $('view').replaceChildren(
     h('div', { class: 'card flush' },
-      h('div', { class: 'card-head' },
-        h('h2', {}, 'Daily challenges'),
-        h('span', { class: 'muted small' }, `${from} to ${to}`),
-        h('div', { class: 'spacer' }),
-        h('button', { onclick: () => { location.hash = `#/days?around=${shiftDay(center, -28)}`; } }, '← Earlier'),
-        h('button', { onclick: () => { location.hash = '#/days'; } }, 'Today'),
-        h('button', { onclick: () => { location.hash = `#/days?around=${shiftDay(center, 28)}`; } }, 'Later →'),
-        jump,
-        h('button', { onclick: () => { if (jump.value) location.hash = `#/days/${jump.value}`; } }, 'Open day')),
+      h('div', { class: 'card-head' }, h('h2', {}, 'Daily challenges')),
       table([
-        { label: 'Day', value: (row) => h('span', { class: 'mono' }, row.day) },
-        { label: '', value: (row) => whenBadge(row.when) },
+        { label: 'Day', value: (row) => h('span', {},
+          h('span', { class: 'weekday' }, new Date(`${row.day}T12:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC', weekday: 'short' })),
+          h('span', { class: 'mono' }, row.day)) },
+        // (today: its row's highlight alone)
+        { label: '', value: (row) => row.when === 'today' ? '' : whenBadge(row.when) },
         { label: 'Level', value: (row) => row.set ? `${row.levelTitle} (${row.level})` : h('span', { class: 'muted' }, row.when === 'future' ? 'not set yet' : 'never asked for') },
         { label: 'Difficulty', value: (row) => row.set ? DIFFICULTY_NAMES[row.difficulty] : '' },
         { label: 'Skulls', wrap: true, value: (row) => row.set ? (row.skulls.map(skullName).join(', ') || 'none') : '' },
         { label: 'Players', num: true, value: (row) => row.players || '' },
         { label: 'Best', value: (row) => row.bestScore != null ? `${number(row.bestScore)} · ${row.bestName}` : '' },
         { label: '', value: (row) => row.byHand ? h('span', { class: 'badge', title: 'Changed or made here' }, 'changed') : '' },
-      ], days, { onRow: (row) => { location.hash = `#/days/${row.day}`; }, rowClass: (row) => row.day === today ? 'today' : '' })));
+      ], days, { onRow: (row) => { location.hash = `#/days/${row.day}`; }, rowClass: (row) => row.day === today ? 'today' : '' }),
+      pager));
+}
+
+/** the Monday of the day's week */
+function weekStart(day) {
+  const [year, month, date] = day.split('-').map(Number);
+  return shiftDay(day, -((new Date(Date.UTC(year, month - 1, date)).getUTCDay() + 6) % 7));
 }
 
 function shiftDay(day, days) {
   const [year, month, date] = day.split('-').map(Number);
   return new Date(Date.UTC(year, month - 1, date + days)).toISOString().slice(0, 10);
+}
+
+/** an instant in the server's time zone, as its days are */
+const zoned = (value, options) => new Date(value).toLocaleString(undefined, { timeZone: meta.timeZone, ...options });
+
+/** how far the day is from today ("tomorrow", "3 days ago"), and for today, how long it has left */
+function dayDistance(day, data) {
+  if (data.when === 'today') {
+    const minutes = Math.max(0, Math.round((new Date(data.closesAt) - Date.now()) / 60000));
+    return `Closes in ${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  }
+  const days = Math.round((Date.parse(day) - Date.parse(meta.today)) / 86400e3);
+  const text = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' }).format(days, 'day');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** the day's header: where it is among the days, what it is, and (actions) what can be done with it */
+function dayHead(day, data, actions) {
+  const challenge = data.challenge;
+  const longDay = new Date(`${day}T12:00:00Z`).toLocaleDateString(undefined,
+    { timeZone: 'UTC', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const shortDay = (other) => new Date(`${other}T12:00:00Z`).toLocaleDateString(undefined,
+    { timeZone: 'UTC', month: 'short', day: 'numeric' });
+  const best = data.scores[0];
+  const fact = (label, value, note) => h('div', { class: 'fact' },
+    h('div', { class: 'label' }, label), h('div', { class: 'value' }, value), note ? h('div', { class: 'note' }, note) : null);
+  const clock = (value) => zoned(value, { hour: '2-digit', minute: '2-digit' });
+  const go = (other) => () => { location.hash = `#/days/${other}`; };
+  const jump = h('input', { type: 'date', value: day, 'aria-label': 'Go to day',
+    onchange: () => { if (jump.value && jump.value !== day) location.hash = `#/days/${jump.value}`; } });
+
+  return h('div', { class: 'day-head' },
+    h('div', { class: 'day-nav' },
+      h('a', { href: `#/days?around=${day}` }, '← All days'),
+      data.when === 'today' ? null : h('button', { class: 'small', onclick: go(meta.today) }, 'Go to today'),
+      h('div', { class: 'spacer' }),
+      h('div', { class: 'day-step' },
+        h('button', { onclick: go(shiftDay(day, -1)), title: 'Day before' }, `‹ ${shortDay(shiftDay(day, -1))}`),
+        jump,
+        h('button', { onclick: go(shiftDay(day, 1)), title: 'Day after' }, `${shortDay(shiftDay(day, 1))} ›`))),
+    h('div', { class: 'day-main' },
+      h('div', { class: 'day-title' },
+        h('div', {}, h('span', { class: `badge ${data.when}` }, dayDistance(day, data))),
+        h('h2', {}, longDay),
+        h('div', { class: 'sub' }, challenge ?
+          `${challenge.levelTitle} · ${DIFFICULTY_NAMES[challenge.difficulty]} · ${challenge.skulls.length} skull${challenge.skulls.length === 1 ? '' : 's'}` :
+          'No challenge yet')),
+      actions),
+    h('div', { class: 'facts' },
+      fact('Open', `${clock(data.opensAt)} – ${clock(data.closesAt)}`, meta.timeZone),
+      fact('Players', `${number(data.players)}${best ? ` · best ${number(best.score)} by ${best.name}` : ''}`),
+      challenge ? fact('Version', challenge.version) : null,
+      challenge ? fact('Made', date(challenge.createdAt)) : null,
+      challenge?.updatedAt ? fact('Changed', date(challenge.updatedAt)) : null));
 }
 
 async function dayView(day) {
@@ -287,15 +352,31 @@ async function dayView(day) {
   const data = result.data;
   const challenge = data.challenge;
 
-  const head = h('div', { class: 'card-head' },
-    h('a', { href: `#/days?around=${day}` }, '← Days'),
-    h('h2', {}, day), whenBadge(data.when),
-    h('span', { class: 'muted small' }, `${date(data.opensAt)} – ${date(data.closesAt)}`),
-    h('div', { class: 'spacer' }),
-    h('button', { onclick: () => { location.hash = `#/days/${shiftDay(day, -1)}`; } }, '← Day before'),
-    h('button', { onclick: () => { location.hash = `#/days/${shiftDay(day, 1)}`; } }, 'Day after →'));
+  // (the actions in the header, for the editor's changes: Save and Discard only with some)
+  const editorCard = h('div', { class: 'card' });
+  const actions = h('div', { class: 'day-actions' });
+  let form = null;
+  const showActions = () => {
+    const dirty = Boolean(form?.dirty());
+    actions.replaceChildren(...[].concat(challenge ? [
+      dirty ? h('button', { onclick: discard }, 'Discard changes') : null,
+      h('button', { class: 'danger', onclick: () => deleteDay(day, data) }, 'Delete'),
+      h('button', { onclick: () => regenerate(day, true) }, 'Regenerate'),
+      h('button', { class: 'primary', disabled: !dirty, onclick: () => save(day, form.fields()) }, 'Save'),
+    ] : [h('button', { class: 'primary', onclick: () => regenerate(day, false) }, 'Make it now')]).filter(Boolean));
+  };
+  const discard = () => {
+    form = editor(challenge, showActions);
+    editorCard.replaceChildren(form.node);
+    showActions();
+  };
+  if (challenge) discard();
+  else {
+    editorCard.replaceChildren(unsetDay(data));
+    showActions();
+  }
 
-  const sections = [h('div', { class: 'card' }, head, challenge ? editor(day, data) : unsetDay(day, data))];
+  const sections = [h('div', { class: 'card' }, dayHead(day, data, actions)), editorCard];
   sections.push(h('div', { class: 'card flush' },
     h('div', { class: 'card-head' }, h('h2', {}, 'Leaderboard'), h('span', { class: 'muted small' }, `${data.players} player${data.players === 1 ? '' : 's'}`)),
     table([
@@ -319,69 +400,132 @@ async function dayView(day) {
   $('view').replaceChildren(h('div', { class: 'stack' }, ...sections));
 }
 
-function unsetDay(day, data) {
-  return h('div', { class: 'stack' },
-    h('p', { class: 'muted', style: 'margin:0' }, data.when === 'future' ?
-      'No challenge set for this day yet: one is made at random the first time the day is asked for. Make it now to see it, or change it.' :
-      'No challenge was made for this day (nobody asked for it).'),
-    h('div', { class: 'row' }, h('button', { class: 'primary', onclick: () => regenerate(day, false) }, 'Make it now')));
+function unsetDay(data) {
+  return h('p', { class: 'muted', style: 'margin:0' }, data.when === 'future' ?
+    'No challenge set for this day yet: one is made at random the first time the day is asked for. Make it now to see it, or change it.' :
+    'No challenge was made for this day (nobody asked for it).');
 }
 
-function editor(day, data) {
-  const challenge = data.challenge;
+/** the challenge's fields to change: its node, the fields as they are, and whether they differ from the challenge's (onChange: each change) */
+function editor(challenge, onChange) {
   const levels = h('select', {}, meta.levels.map((level) =>
     h('option', { value: level.key, selected: level.key === challenge.level }, `${level.title} (${level.key})`)));
   const difficulty = h('select', {}, meta.difficulties.map((name, index) =>
     h('option', { value: index, selected: index === challenge.difficulty }, DIFFICULTY_NAMES[index])));
   const seed = h('input', { type: 'number', min: 1, max: 4294967295, value: challenge.seed });
   const skullBoxes = meta.skulls.map((skull) => h('input', { type: 'checkbox', value: skull, checked: challenge.skulls.includes(skull) }));
-  const details = h('textarea', { rows: 4 }, (challenge.details || []).join('\n'));
-  const config = h('textarea', { rows: 14 }, JSON.stringify(challenge.config || {}, null, 2));
-  const message = h('div');
+  const randomizer = randomizerEditor(challenge.randomizer);
 
-  const fields = () => {
-    let parsed;
-    try {
-      parsed = JSON.parse(config.value || '{}');
-    } catch (error) {
-      message.replaceChildren(h('div', { class: 'notice bad' }, `The settings are not JSON: ${error.message}`));
-      return null;
-    }
-    return {
-      level: levels.value,
-      difficulty: Number(difficulty.value),
-      seed: Number(seed.value),
-      skulls: skullBoxes.filter((box) => box.checked).map((box) => box.value),
-      details: details.value.split('\n').map((line) => line.trim()).filter(Boolean),
-      config: parsed,
-    };
-  };
+  const fields = () => ({
+    level: levels.value,
+    difficulty: Number(difficulty.value),
+    seed: Number(seed.value),
+    skulls: skullBoxes.filter((box) => box.checked).map((box) => box.value),
+    randomizer: randomizer.value(),
+  });
 
-  return h('div', { class: 'stack' },
+  const node = h('div', { class: 'stack' },
     h('div', { class: 'form-grid' },
       h('label', { class: 'field' }, 'Level', levels),
       h('label', { class: 'field' }, 'Difficulty', difficulty),
       h('label', { class: 'field' }, 'Seed', h('div', { class: 'row' }, seed,
-        h('button', { type: 'button', class: 'small', onclick: () => { seed.value = 1 + Math.floor(Math.random() * 0xFFFFFFFE); } }, 'New'))),
-      h('label', { class: 'field' }, 'Version', h('input', { value: challenge.version, disabled: true }))),
+        h('button', { type: 'button', class: 'small', onclick: () => { seed.value = 1 + Math.floor(Math.random() * 0xFFFFFFFE); onChange(); } }, 'New')))),
+    h('div', {}, h('h3', {}, 'Randomizer'), randomizer.node),
     h('div', {}, h('h3', {}, `Skulls`),
-      h('div', { class: 'skull-grid' }, skullBoxes.map((box) => h('label', {}, box, skullName(box.value))))),
-    h('label', { class: 'field' }, 'Details (a line each, at most 4, shown in the game)', details),
-    h('details', {}, h('summary', {}, 'Settings sent to the game (randomizer and skulls)'),
-      h('p', { class: 'muted small' }, 'The game takes only game.randomizer*, game.skulls* and game.campaign_score. game.skulls and game.skulls_active follow the skulls above.'),
-      config),
-    message,
-    h('div', { class: 'row' },
-      h('button', { class: 'primary', onclick: async () => {
-        const body = fields();
-        if (body) await save(day, body);
-      } }, 'Save'),
-      h('button', { onclick: () => regenerate(day, true) }, 'Make again at random'),
-      h('div', { class: 'spacer' }),
-      h('button', { class: 'danger', onclick: () => deleteDay(day, data) }, 'Delete challenge')),
-    h('details', {}, h('summary', {}, 'As the game is sent it'), h('pre', {}, JSON.stringify(data.asServed, null, 2))),
-    h('p', { class: 'muted small', style: 'margin:0' },
-      `Made ${date(challenge.createdAt)}${challenge.updatedAt ? `, changed ${date(challenge.updatedAt)}` : ''}.`));
+      h('div', { class: 'skull-grid' }, skullBoxes.map((box) => h('label', {}, box, skullName(box.value))))));
+  const initial = JSON.stringify(fields());
+  node.addEventListener('input', () => onChange());
+  node.addEventListener('change', () => onChange());
+  return { node, fields, dirty: () => JSON.stringify(fields()) !== initial };
+}
+
+/** the randomizer's category open (kept from one day to another) */
+let randomizerFolder = null;
+
+const FOLDER_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 6.5A2.5 2.5 0 0 1 5.5 4h4l2 2h7A2.5 2.5 0 0 1 21 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></svg>';
+
+/**
+ * the randomizer's setup, as the game's randomizer screens offer it
+ * (meta.randomizer): its categories as folders, one open at a time, each a
+ * choice a field; a field that does not apply hidden, a choice that cannot be
+ * had with the rest marked
+ */
+function randomizerEditor(initial) {
+  const value = { ...initial };
+  const allFields = meta.randomizer.flatMap((group) => group.fields);
+  const labelOf = (key) => allFields.find((field) => field.key === key).label;
+  const meets = (needs) => !needs || Object.entries(needs).every(([key, wanted]) => value[key] === wanted);
+  const choicesOf = (field) => field.ranks ? field.ranks[value.type]?.choices ?? null : field.choices;
+  const applies = (field) => Boolean(choicesOf(field)) && meets(field.needs);
+  const choiceOf = (field) => choicesOf(field).find((option) => option.value === value[field.key]);
+  if (!meta.randomizer.some((group) => group.key === randomizerFolder)) randomizerFolder = meta.randomizer[0].key;
+
+  /** a category at a glance: off (its first field, the switch), or its choices */
+  const summary = (group) => {
+    const [main, ...rest] = group.fields;
+    if (!value[main.key]) return 'Off';
+    const parts = rest.filter(applies).map((field) => {
+      const choice = choiceOf(field);
+      if (typeof choice?.value === 'boolean') return choice.value ? field.label : null;
+      return field.ranks ? `${choice?.label} rank` : choice?.label;
+    }).filter(Boolean);
+    return ['On', ...parts].join(' · ');
+  };
+
+  const rows = [];
+  const folders = meta.randomizer.map((group) => {
+    const note = h('span', { class: 'summary' });
+    const button = h('button', { type: 'button', role: 'tab',
+      onclick: () => { randomizerFolder = group.key; refresh(); } },
+      h('span', { class: 'name' }, h('span', { class: 'icon' }), group.title), note);
+    button.querySelector('.icon').innerHTML = FOLDER_ICON;
+    const pane = h('div', { class: 'folder-pane', role: 'tabpanel' },
+      h('h4', {}, group.title),
+      h('div', { class: 'form-grid' }, group.fields.map((field) => {
+        const select = h('select', { onchange: () => { value[field.key] = choicesOf(field)[select.value].value; refresh(); } });
+        const label = h('span');
+        const node = h('label', { class: 'field' }, label, select);
+        rows.push({ field, select, label, node });
+        return node;
+      })));
+    return { group, button, note, pane };
+  });
+
+  function refresh() {
+    for (const { field, select, label, node } of rows) {
+      const options = choicesOf(field);
+      node.hidden = !applies(field);
+      if (!options) continue;
+      label.textContent = field.ranks ? field.ranks[value.type].label : field.label;
+      let selected = options.findIndex((option) => option.value === value[field.key]);
+      if (selected < 0) {
+        // (a rank another type has: its first)
+        selected = 0;
+        value[field.key] = options[0].value;
+      }
+      select.replaceChildren(...options.map((option, index) => {
+        const blocked = !meets(option.needs);
+        return h('option', { value: index, selected: index === selected, disabled: blocked && index !== selected },
+          blocked ? `${option.label} (needs ${Object.keys(option.needs).map(labelOf).join(' and ')} on)` : option.label);
+      }));
+    }
+    for (const { group, button, note, pane } of folders) {
+      const open = group.key === randomizerFolder;
+      button.classList.toggle('active', open);
+      button.classList.toggle('off', !value[group.fields[0].key]);
+      button.setAttribute('aria-selected', String(open));
+      note.textContent = summary(group);
+      note.title = note.textContent;
+      pane.hidden = !open;
+    }
+  }
+  refresh();
+  return {
+    node: h('div', { class: 'folders' },
+      h('div', { class: 'folder-list', role: 'tablist' }, folders.map((folder) => folder.button)),
+      folders.map((folder) => folder.pane)),
+    value: () => ({ ...value }),
+  };
 }
 
 /** a change that has scores: whether to go on, and with them or without */
@@ -389,7 +533,8 @@ async function withScores(result) {
   const error = result.error;
   const answer = await choose('This day has scores', [
     `${error.players} player${error.players === 1 ? ' has' : 's have'} runs of this challenge.`,
-    error.changes?.length ? `Changing ${error.changes.join(', ')} makes their runs another challenge's: games playing the old one will be refused (settings_mismatch).` : '',
+    error.changes?.length ? `Changing ${error.changes.join(', ')} makes their runs another challenge's.` : '',
+    error.changes?.some((change) => change !== 'randomizer') ? 'Games playing the old one will be refused (settings_mismatch).' : '',
   ].filter(Boolean), [
     { value: 'keep', label: 'Change, keep scores' },
     { value: 'clear', label: 'Change, delete scores', class: 'danger' },
@@ -411,8 +556,8 @@ async function save(day, body) {
 }
 
 async function regenerate(day, confirmFirst) {
-  if (confirmFirst && !await choose('Make again at random?', 'A new level, difficulty, randomizer setup, skulls and seed.', [
-    { value: 'yes', label: 'Make again', class: 'primary' }])) return;
+  if (confirmFirst && !await choose('Regenerate this challenge?', 'A new level, difficulty, randomizer setup, skulls and seed, at random.', [
+    { value: 'yes', label: 'Regenerate', class: 'primary' }])) return;
   let result = await api('POST', `/days/${day}/regenerate`, {});
   if (result.status === 409 && result.error?.type === 'has_scores') {
     const options = await withScores(result);
@@ -420,7 +565,7 @@ async function regenerate(day, confirmFirst) {
     result = await api('POST', `/days/${day}/regenerate`, options);
   }
   if (!result.ok) return toast(errorText(result));
-  toast('Made');
+  toast(confirmFirst ? 'Regenerated' : 'Made');
   dayView(day);
 }
 

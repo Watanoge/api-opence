@@ -4,11 +4,14 @@
  * stores what generateChallenge returns, so a day's challenge never changes
  * once someone has seen it.
  *
- * The challenge's `config` is a set of the game's own settings
- * (port/linux/src/port_config.c's "section.key" names, values as text), which
- * the game applies for the run without writing them to config.toml. Every
+ * The challenge's `randomizer` is its setup, as the game's randomizer screens
+ * offer it (RANDOMIZER_GROUPS); its `config`, worked out from that and its
+ * skulls (challengeConfig), is the set of the game's own settings
+ * (port/linux/src/port_config.c's "section.key" names, values as text) the
+ * game applies for the run without writing them to config.toml. Every
  * randomizer and skulls setting is given, so nothing of the player's own
- * setup leaks into a challenge.
+ * setup leaks into a challenge; and its `details`, the lines the game shows,
+ * are the randomizer's too (challengeDetails).
  */
 const crypto = require('crypto');
 
@@ -48,59 +51,262 @@ const SHIELD_SKULLS = ['black_eye', 'give_and_take', 'streaking', 'rip_and_tear'
 /** how many skulls a day turns on, by weight */
 const SKULL_COUNT_WEIGHTS = { 0: 1, 1: 3, 2: 4, 3: 5, 4: 4, 5: 3, 6: 2, 7: 1, 8: 1 };
 
-/** the actors a squad may become (game.randomizer_pool), with their labels */
+/**
+ * the randomizer's settings a challenge sets, as the game's randomizer screens
+ * offer them (port/assets/menus/ce/main_menu.difficulty_select.randomizer.xml's
+ * spinners, and Settings > Gameplay > Randomizer's for Go Crazy): each a field
+ * of a challenge's `randomizer`, its setting, and its choices, with the
+ * labels the screens show. `needs`: the other fields' values it applies with
+ * (a choice's: those it can be chosen with)
+ */
+const TOGGLE = [{ value: false, label: 'OFF' }, { value: true, label: 'ON' }];
+
+function choices(values, labels) {
+    const names = labels.split('|');
+    return values.split('|').map((value, index) => ({ value, label: names[index] }));
+}
+
+/** (the flamethrower, multiplayer's, only with Go Crazy's) */
+const FLAMETHROWER_NEEDS = { crazy: true, crazyFlamethrower: true };
+const WEAPON_TYPES = choices(
+    'pistol|assault_rifle|shotgun|sniper_rifle|rocket_launcher|flamethrower|plasma_pistol|plasma_rifle|needler',
+    'PISTOL|ASSAULT RIFLE|SHOTGUN|SNIPER RIFLE|ROCKETS|FLAMETHROWER|PLASMA PISTOL|PLASMA RIFLE|NEEDLER')
+    .map((choice) => (choice.value === 'flamethrower' ? { ...choice, needs: FLAMETHROWER_NEEDS } : choice));
+const WEAPON_POOL_CHOICES = choices('any|covenant|human|precision|automatic|power|one',
+    'ANY|COVENANT|HUMAN|PRECISION|AUTOMATIC|POWER|ONE TYPE');
+
+/** the ranks of game.randomizer_type's types that have them, each its own setting */
+const RANKS = {
+    grunt: { label: 'RANK', setting: 'game.randomizer_grunt_rank',
+        choices: choices('any|minor|major|specops', 'ANY|MINOR|MAJOR|SPEC OPS') },
+    elite: { label: 'RANK', setting: 'game.randomizer_elite_rank',
+        choices: choices('any|minor|major|specops|zealot|stealth', 'ANY|MINOR|MAJOR|SPEC OPS|ZEALOT|STEALTH') },
+    jackal: { label: 'RANK', setting: 'game.randomizer_jackal_rank', choices: choices('any|minor|major', 'ANY|MINOR|MAJOR') },
+    hunter: { label: 'RANK', setting: 'game.randomizer_hunter_rank', choices: choices('any|minor|major', 'ANY|MINOR|MAJOR') },
+    flood_combat: { label: 'FORM OF', setting: 'game.randomizer_flood_combat_rank',
+        choices: choices('any|human|elite', 'ANY|HUMAN|ELITE') },
+};
+
+const RANDOMIZER_GROUPS = [
+    { key: 'enemies', title: 'AI', fields: [
+        { key: 'enemies', label: 'ENEMIES', setting: 'game.randomizer_enemies', choices: TOGGLE },
+        { key: 'allies', label: 'ALLIES TOO', setting: 'game.randomizer_allies', choices: TOGGLE,
+            needs: { enemies: true } },
+        { key: 'pool', label: 'ENEMY POOL', setting: 'game.randomizer_pool',
+            choices: choices('any|covenant|flood|human|one', 'ANY|COVENANT|FLOOD|HUMAN|ONE TYPE'),
+            needs: { enemies: true } },
+        { key: 'type', label: 'ENEMY TYPE', setting: 'game.randomizer_type',
+            choices: choices('grunt|elite|jackal|hunter|flood_combat|flood_carrier|marine|engineer|sentinel',
+                'GRUNT|ELITE|JACKAL|HUNTER|COMBAT FORM|CARRIER FORM|MARINE|ENGINEER|SENTINEL'),
+            needs: { enemies: true, pool: 'one' } },
+        // (its choices and setting the type's: RANKS)
+        { key: 'rank', label: 'RANK', ranks: RANKS, needs: { enemies: true, pool: 'one' } },
+    ] },
+    { key: 'weapons', title: 'Equipped Weapons', fields: [
+        { key: 'enemyWeapons', label: 'ENEMY WEAPONS', setting: 'game.randomizer_enemy_weapons', choices: TOGGLE },
+        { key: 'weaponPool', label: 'WEAPON POOL', setting: 'game.randomizer_weapon_pool', choices: WEAPON_POOL_CHOICES,
+            needs: { enemyWeapons: true } },
+        { key: 'weaponType', label: 'WEAPON TYPE', setting: 'game.randomizer_weapon_type',
+            choices: [...WEAPON_TYPES, ...choices('fuel_rod|energy_sword', 'FUEL ROD|ENERGY SWORD')],
+            needs: { enemyWeapons: true, weaponPool: 'one' } },
+    ] },
+    { key: 'pickups', title: 'World Weapons', fields: [
+        { key: 'pickups', label: 'WEAPON PICKUPS', setting: 'game.randomizer_pickups', choices: TOGGLE },
+        { key: 'pickupPool', label: 'PICKUP POOL', setting: 'game.randomizer_pickup_pool', choices: WEAPON_POOL_CHOICES,
+            needs: { pickups: true } },
+        { key: 'pickupType', label: 'PICKUP TYPE', setting: 'game.randomizer_pickup_type', choices: WEAPON_TYPES,
+            needs: { pickups: true, pickupPool: 'one' } },
+    ] },
+    { key: 'crazy', title: 'Crazy Mode', fields: [
+        { key: 'crazy', label: 'GO CRAZY', setting: 'game.randomizer_crazy', choices: TOGGLE },
+        { key: 'crazyWeapons', label: 'ANY NPC, ANY WEAPON', setting: 'game.randomizer_crazy_weapons', choices: TOGGLE,
+            needs: { crazy: true } },
+        { key: 'crazyEnemies', label: 'ENGINEERS & SENTINELS', setting: 'game.randomizer_crazy_enemies', choices: TOGGLE,
+            needs: { crazy: true } },
+        { key: 'crazyFlamethrower', label: 'FLAMETHROWER', setting: 'game.randomizer_crazy_flamethrower', choices: TOGGLE,
+            needs: { crazy: true } },
+        { key: 'crazyPods', label: 'FLOOD PODS SWAPPED', setting: 'game.randomizer_crazy_pods',
+            choices: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100].map((value) => ({ value, label: `${value}%` })),
+            needs: { crazy: true } },
+    ] },
+];
+const RANDOMIZER_FIELDS = RANDOMIZER_GROUPS.flatMap((group) => group.fields);
+
+/** a randomizer that changes nothing but the enemies (the game's own defaults otherwise) */
+const RANDOMIZER_DEFAULTS = {
+    enemies: true, allies: false, pool: 'any', type: 'grunt', rank: 'any',
+    enemyWeapons: false, weaponPool: 'any', weaponType: 'plasma_rifle',
+    pickups: false, pickupPool: 'any', pickupType: 'pistol',
+    crazy: false, crazyWeapons: false, crazyEnemies: false, crazyFlamethrower: false, crazyPods: 30,
+};
+
+/** whether the randomizer has the values `needs` asks for */
+function meets(randomizer, needs) {
+    return !needs || Object.entries(needs).every(([key, value]) => randomizer[key] === value);
+}
+
+/** a field's choices, for the randomizer (the rank's: its type's) */
+function fieldChoices(field, randomizer) {
+    return field.ranks ? field.ranks[randomizer.type]?.choices ?? null : field.choices;
+}
+
+/**
+ * the randomizer given (its fields, any of them) over `base`, checked against
+ * the screens' choices: a field that applies must be one of its choices, and
+ * one it can be chosen with; one that does not is its default if it is not
+ */
+function checkedRandomizer(base, given) {
+    const errors = [];
+    const randomizer = { ...RANDOMIZER_DEFAULTS, ...base };
+    if (given === undefined) return { errors, randomizer };
+    if (!given || typeof given !== 'object' || Array.isArray(given)) {
+        return { errors: ['randomizer is an object of its fields'], randomizer };
+    }
+    for (const [key, value] of Object.entries(given)) {
+        if (!(key in RANDOMIZER_DEFAULTS)) errors.push(`randomizer: ${key} is not one of its fields`);
+        else randomizer[key] = value;
+    }
+    for (const field of RANDOMIZER_FIELDS) {
+        const options = fieldChoices(field, randomizer);
+        if (!options) {
+            // (a type without ranks)
+            randomizer[field.key] = 'any';
+            continue;
+        }
+        const choice = options.find((option) => option.value === randomizer[field.key]);
+        if (!choice) {
+            // (one that does not apply is left as it is by default)
+            if (meets(randomizer, field.needs)) {
+                errors.push(`randomizer: ${field.key} is one of ${options.map((option) => JSON.stringify(option.value)).join(', ')}`);
+            } else randomizer[field.key] = RANDOMIZER_DEFAULTS[field.key];
+        } else if (meets(randomizer, field.needs) && !meets(randomizer, choice.needs)) {
+            const names = Object.keys(choice.needs).map((key) => RANDOMIZER_FIELDS.find((other) => other.key === key).label);
+            errors.push(`randomizer: ${field.label} ${choice.label} needs ${names.join(' and ')} on`);
+        }
+    }
+    return { errors, randomizer };
+}
+
+/** the randomizer of a challenge's settings (one kept before challenges had their `randomizer`) */
+function randomizerFromConfig(config = {}) {
+    const randomizer = { ...RANDOMIZER_DEFAULTS };
+    for (const field of RANDOMIZER_FIELDS) {
+        const setting = field.ranks ? field.ranks[config['game.randomizer_type']]?.setting : field.setting;
+        const text = setting ? config[setting] : undefined;
+        if (text === undefined) continue;
+        const choice = (fieldChoices(field, { type: config['game.randomizer_type'] }) || [])
+            .find((option) => String(option.value) === text);
+        if (choice) randomizer[field.key] = choice.value;
+    }
+    return randomizer;
+}
+
+/** the game's settings for a challenge: its randomizer's and its skulls' */
+function challengeConfig(randomizer, skulls) {
+    const config = { 'game.campaign_score': 'true', 'game.randomizer': 'true' };
+    for (const field of RANDOMIZER_FIELDS) {
+        if (field.ranks) {
+            for (const [type, rank] of Object.entries(field.ranks)) {
+                config[rank.setting] = randomizer.pool === 'one' && randomizer.type === type ? randomizer.rank : 'any';
+            }
+        } else config[field.setting] = String(randomizer[field.key]);
+    }
+    return {
+        ...config,
+        'game.skulls': skulls.length ? 'true' : 'false',
+        'game.skulls_active': skulls.join(','),
+        // (every skull had for the run, none dropped, none lost on a death)
+        'game.skulls_unlock_mode': 'play',
+        'game.skulls_all_unlocked': 'true',
+        'game.skulls_instant_unlock': 'false',
+        'game.skulls_lose_on_death': 'false',
+        'game.skulls_drop_count': '0',
+    };
+}
+
+/** how the challenge's lines name the randomizer's choices (community.c's random runs say the same) */
+const POOL_LABELS = { any: 'ALL KINDS', covenant: 'COVENANT ONLY', flood: 'FLOOD ONLY', human: 'MARINES ONLY' };
+const TYPE_LABELS = {
+    grunt: 'GRUNTS', elite: 'ELITES', jackal: 'JACKALS', hunter: 'HUNTERS', flood_combat: 'COMBAT FORMS',
+    flood_carrier: 'CARRIER FORMS', marine: 'MARINES', engineer: 'ENGINEERS', sentinel: 'SENTINELS',
+};
+const WEAPON_POOL_LABELS = {
+    any: 'ANY', covenant: 'COVENANT', human: 'HUMAN', precision: 'PRECISION', automatic: 'AUTOMATIC', power: 'POWER',
+};
+const WEAPON_LABELS = {
+    pistol: 'PISTOL', assault_rifle: 'ASSAULT RIFLE', shotgun: 'SHOTGUN', sniper_rifle: 'SNIPER RIFLE',
+    rocket_launcher: 'ROCKET LAUNCHER', flamethrower: 'FLAMETHROWER', plasma_pistol: 'PLASMA PISTOL',
+    plasma_rifle: 'PLASMA RIFLE', needler: 'NEEDLER', fuel_rod: 'FUEL ROD', energy_sword: 'ENERGY SWORD',
+};
+
+/** the lines the game shows of a challenge's randomizer */
+function challengeDetails(randomizer) {
+    const weapons = (on, pool, type) => {
+        if (!on) return 'NOT RANDOMIZED';
+        return pool === 'one' ? `${WEAPON_LABELS[type]} ONLY` : WEAPON_POOL_LABELS[pool];
+    };
+    let enemies = 'NOT RANDOMIZED';
+    if (randomizer.enemies) {
+        enemies = randomizer.pool === 'one' ?
+            `${randomizer.rank === 'any' ? '' : `${randomizer.rank.toUpperCase()} `}${TYPE_LABELS[randomizer.type]} ONLY` :
+            POOL_LABELS[randomizer.pool];
+        if (randomizer.allies) enemies += ', ALLIES TOO';
+    }
+    const details = [
+        `ENEMIES: ${enemies}`,
+        `ENEMY WEAPONS: ${weapons(randomizer.enemyWeapons, randomizer.weaponPool, randomizer.weaponType)}`,
+        `PICKUPS: ${weapons(randomizer.pickups, randomizer.pickupPool, randomizer.pickupType)}`,
+    ];
+    if (randomizer.crazy) details.push('GO CRAZY: ON');
+    return details;
+}
+
+/** how a squad's actors are picked at random (game.randomizer_pool) */
 const POOLS = [
-    { pool: 'any', weight: 6, label: 'ALL KINDS' },
-    { pool: 'covenant', weight: 4, label: 'COVENANT ONLY' },
-    { pool: 'flood', weight: 4, label: 'FLOOD ONLY' },
-    { pool: 'human', weight: 1, label: 'MARINES ONLY' },
-    { pool: 'one', weight: 4, label: null },
+    { pool: 'any', weight: 6 },
+    { pool: 'covenant', weight: 4 },
+    { pool: 'flood', weight: 4 },
+    { pool: 'human', weight: 1 },
+    { pool: 'one', weight: 4 },
 ];
 
 /**
- * game.randomizer_pool "one"'s types, with the ranks each may have (its
- * game.randomizer_<type>_rank); engineers, carriers and infection forms
- * alone do not fight, and are left out
+ * game.randomizer_pool "one"'s types picked at random, with the ranks each
+ * may have; engineers, carriers and infection forms alone do not fight, and
+ * are left out
  */
 const ONE_TYPES = [
-    { type: 'grunt', weight: 3, label: 'GRUNTS', ranks: ['any', 'minor', 'major', 'specops'] },
-    { type: 'elite', weight: 3, label: 'ELITES', ranks: ['any', 'minor', 'major', 'specops', 'zealot', 'stealth'] },
-    { type: 'jackal', weight: 2, label: 'JACKALS', ranks: ['any', 'minor', 'major'] },
-    { type: 'hunter', weight: 1, label: 'HUNTERS', ranks: ['any'] },
-    { type: 'flood_combat', weight: 2, label: 'COMBAT FORMS', ranks: ['any', 'human', 'elite'] },
-    { type: 'sentinel', weight: 1, label: 'SENTINELS', ranks: null },
-    { type: 'marine', weight: 1, label: 'MARINES', ranks: null },
+    { type: 'grunt', weight: 3, ranks: ['any', 'minor', 'major', 'specops'] },
+    { type: 'elite', weight: 3, ranks: ['any', 'minor', 'major', 'specops', 'zealot', 'stealth'] },
+    { type: 'jackal', weight: 2, ranks: ['any', 'minor', 'major'] },
+    { type: 'hunter', weight: 1, ranks: ['any'] },
+    { type: 'flood_combat', weight: 2, ranks: ['any', 'human', 'elite'] },
+    { type: 'sentinel', weight: 1, ranks: null },
+    { type: 'marine', weight: 1, ranks: null },
 ];
-const RANK_SETTINGS = {
-    grunt: 'game.randomizer_grunt_rank',
-    elite: 'game.randomizer_elite_rank',
-    jackal: 'game.randomizer_jackal_rank',
-    hunter: 'game.randomizer_hunter_rank',
-    flood_combat: 'game.randomizer_flood_combat_rank',
-};
 
-/** game.randomizer_pickup_pool's and _weapon_pool's choices (power: the actors' only) */
+/** the weapon pools picked at random (power: the actors' only) */
 const WEAPON_POOLS = [
-    { pool: 'any', weight: 5, label: 'ANY' },
-    { pool: 'covenant', weight: 2, label: 'COVENANT' },
-    { pool: 'human', weight: 2, label: 'HUMAN' },
-    { pool: 'precision', weight: 1, label: 'PRECISION' },
-    { pool: 'automatic', weight: 1, label: 'AUTOMATIC' },
-    { pool: 'power', weight: 1, label: 'POWER', actorsOnly: true },
-    { pool: 'one', weight: 1, label: null },
+    { pool: 'any', weight: 5 },
+    { pool: 'covenant', weight: 2 },
+    { pool: 'human', weight: 2 },
+    { pool: 'precision', weight: 1 },
+    { pool: 'automatic', weight: 1 },
+    { pool: 'power', weight: 1, actorsOnly: true },
+    { pool: 'one', weight: 1 },
 ];
-/** the weapons "one" may be (randomizer.c's weapon_kinds) */
+/** the weapons "one" may be picked as (randomizer.c's weapon_kinds; no flamethrower) */
 const WEAPON_KINDS = [
-    { kind: 'pistol', label: 'PISTOL' },
-    { kind: 'assault_rifle', label: 'ASSAULT RIFLE' },
-    { kind: 'shotgun', label: 'SHOTGUN' },
-    { kind: 'sniper_rifle', label: 'SNIPER RIFLE' },
-    { kind: 'rocket_launcher', label: 'ROCKET LAUNCHER' },
-    { kind: 'plasma_pistol', label: 'PLASMA PISTOL' },
-    { kind: 'plasma_rifle', label: 'PLASMA RIFLE' },
-    { kind: 'needler', label: 'NEEDLER' },
-    { kind: 'fuel_rod', label: 'FUEL ROD', actorsOnly: true },
-    { kind: 'energy_sword', label: 'ENERGY SWORD', actorsOnly: true },
+    { kind: 'pistol' },
+    { kind: 'assault_rifle' },
+    { kind: 'shotgun' },
+    { kind: 'sniper_rifle' },
+    { kind: 'rocket_launcher' },
+    { kind: 'plasma_pistol' },
+    { kind: 'plasma_rifle' },
+    { kind: 'needler' },
+    { kind: 'fuel_rod', actorsOnly: true },
+    { kind: 'energy_sword', actorsOnly: true },
 ];
 
 /** how a difficulty is picked: mostly Heroic */
@@ -200,14 +406,13 @@ function chance(percent, random) {
     return random(100) < percent;
 }
 
-/** a weapon pool and, for "one", its weapon; labelled */
+/** a weapon pool and, for "one", its weapon */
 function pickWeapons(random, forActors) {
     const pools = WEAPON_POOLS.filter((entry) => forActors || !entry.actorsOnly);
     const pool = pickWeighted(pools, (entry) => entry.weight, random);
-    if (pool.pool !== 'one') return { pool: pool.pool, kind: null, label: pool.label };
+    if (pool.pool !== 'one') return { pool: pool.pool, kind: null };
     const kinds = WEAPON_KINDS.filter((entry) => forActors || !entry.actorsOnly);
-    const kind = pickOne(kinds, random);
-    return { pool: 'one', kind: kind.kind, label: `${kind.label} ONLY` };
+    return { pool: 'one', kind: pickOne(kinds, random).kind };
 }
 
 /** the skulls: weighted, without two that change the shields */
@@ -243,63 +448,34 @@ function generateChallenge(dayKey, { previousLevel = null, random = cryptoRandom
     const pool = pickWeighted(POOLS, (entry) => entry.weight, random);
     let type = ONE_TYPES[0];
     let rank = 'any';
-    let enemiesLabel = pool.label;
     if (pool.pool === 'one') {
         type = pickWeighted(ONE_TYPES, (entry) => entry.weight, random);
         rank = type.ranks ? pickOne(type.ranks, random) : 'any';
-        enemiesLabel = `${rank === 'any' ? '' : `${rank.toUpperCase()} `}${type.label} ONLY`;
     }
     const allies = chance(25, random);
     const pickups = chance(65, random) ? pickWeapons(random, false) : null;
     const weapons = chance(65, random) ? pickWeapons(random, true) : null;
     const crazy = chance(15, random);
-    const crazyParts = {
-        weapons: crazy && chance(70, random),
-        enemies: crazy && chance(70, random),
-        flamethrower: crazy && chance(50, random),
-        pods: crazy ? 10 * (1 + random(10)) : 30,
+    const randomizer = {
+        enemies: true,
+        allies,
+        pool: pool.pool,
+        type: type.type,
+        rank,
+        enemyWeapons: !!weapons,
+        weaponPool: weapons ? weapons.pool : 'any',
+        weaponType: weapons && weapons.kind ? weapons.kind : 'plasma_rifle',
+        pickups: !!pickups,
+        pickupPool: pickups ? pickups.pool : 'any',
+        pickupType: pickups && pickups.kind ? pickups.kind : 'pistol',
+        crazy,
+        crazyWeapons: crazy && chance(70, random),
+        crazyEnemies: crazy && chance(70, random),
+        crazyFlamethrower: crazy && chance(50, random),
+        crazyPods: crazy ? 10 * (1 + random(10)) : 30,
     };
     const skulls = pickSkulls(Number(pickWeightedKey(SKULL_COUNT_WEIGHTS, random)), random);
     const seed = 1 + random(0xFFFFFFFE);
-
-    const text = (value) => (value ? 'true' : 'false');
-    const config = {
-        'game.campaign_score': 'true',
-        'game.randomizer': 'true',
-        'game.randomizer_enemies': 'true',
-        'game.randomizer_allies': text(allies),
-        'game.randomizer_pool': pool.pool,
-        'game.randomizer_type': type.type,
-        'game.randomizer_pickups': text(!!pickups),
-        'game.randomizer_pickup_pool': pickups ? pickups.pool : 'any',
-        'game.randomizer_pickup_type': pickups && pickups.kind ? pickups.kind : 'pistol',
-        'game.randomizer_enemy_weapons': text(!!weapons),
-        'game.randomizer_weapon_pool': weapons ? weapons.pool : 'any',
-        'game.randomizer_weapon_type': weapons && weapons.kind ? weapons.kind : 'plasma_rifle',
-        'game.randomizer_crazy': text(crazy),
-        'game.randomizer_crazy_weapons': text(crazyParts.weapons),
-        'game.randomizer_crazy_enemies': text(crazyParts.enemies),
-        'game.randomizer_crazy_flamethrower': text(crazyParts.flamethrower),
-        'game.randomizer_crazy_pods': String(crazyParts.pods),
-        'game.skulls': text(skulls.length > 0),
-        'game.skulls_active': skulls.join(','),
-        // (every skull had for the run, none dropped, none lost on a death)
-        'game.skulls_unlock_mode': 'play',
-        'game.skulls_all_unlocked': 'true',
-        'game.skulls_instant_unlock': 'false',
-        'game.skulls_lose_on_death': 'false',
-        'game.skulls_drop_count': '0',
-    };
-    for (const [name, setting] of Object.entries(RANK_SETTINGS)) {
-        config[setting] = pool.pool === 'one' && type.type === name ? rank : 'any';
-    }
-
-    const details = [
-        `ENEMIES: ${enemiesLabel}${allies ? ', ALLIES TOO' : ''}`,
-        `ENEMY WEAPONS: ${weapons ? weapons.label : 'NOT RANDOMIZED'}`,
-        `PICKUPS: ${pickups ? pickups.label : 'NOT RANDOMIZED'}`,
-    ];
-    if (crazy) details.push('GO CRAZY: ON');
 
     return {
         day: dayKey,
@@ -310,8 +486,9 @@ function generateChallenge(dayKey, { previousLevel = null, random = cryptoRandom
         difficultyName: DIFFICULTIES[difficulty],
         seed,
         skulls,
-        details,
-        config,
+        randomizer,
+        details: challengeDetails(randomizer),
+        config: challengeConfig(randomizer, skulls),
         opensAt: dayStart(dayKey, timeZone),
         closesAt: dayEnd(dayKey, timeZone),
         timeZone,
@@ -323,6 +500,11 @@ module.exports = {
     DIFFICULTIES,
     SKULL_WEIGHTS,
     CHALLENGE_VERSION,
+    RANDOMIZER_GROUPS,
+    checkedRandomizer,
+    randomizerFromConfig,
+    challengeConfig,
+    challengeDetails,
     serverTimeZone,
     dayKeyAt,
     isDayKey,

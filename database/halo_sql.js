@@ -432,7 +432,8 @@ async function submitChallengeScore(day, key, body) {
 
 /**
  * (HALO_ADMIN_CODE) a day's challenge set by hand: a day to come, or one
- * that has no scores yet; the fields given replace the generated ones
+ * that has no scores yet; the fields given replace the generated ones (the
+ * randomizer's, any of them, over its), and its lines and settings follow
  */
 async function setChallenge(day, body) {
     await ensureIndexes();
@@ -442,11 +443,14 @@ async function setChallenge(day, body) {
     if (await (await collection(DAILY_SCORES)).countDocuments({ day }) > 0) return error('has_scores', 409);
 
     const generated = daily.generateChallenge(day, {});
-    const replacement = { ...generated, ...(body && typeof body === 'object' ? body : {}), day };
-    if (replacement.config && typeof replacement.config === 'object') {
-        replacement.config = { ...generated.config, ...replacement.config };
-    }
-    if (!LEVEL_KEYS.has(replacement.level)) return validationError(['level is not a campaign level']);
+    const given = body && typeof body === 'object' ? body : {};
+    const { errors, randomizer } = daily.checkedRandomizer(generated.randomizer, given.randomizer);
+    const replacement = { ...generated, ...given, day, randomizer };
+    if (!LEVEL_KEYS.has(replacement.level)) errors.push('level is not a campaign level');
+    if (!Array.isArray(replacement.skulls)) errors.push('skulls is a list');
+    if (errors.length) return validationError(errors);
+    replacement.details = daily.challengeDetails(randomizer);
+    replacement.config = daily.challengeConfig(randomizer, replacement.skulls);
     const challenges = await collection(DAILY_CHALLENGES);
     await challenges.replaceOne({ day }, { ...replacement, createdAt: now, updatedAt: now }, { upsert: true });
     return publicChallenge(await challengeOf(day));

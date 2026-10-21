@@ -14,7 +14,7 @@ const { internals } = require('./halo_sql');
 
 const {
     PLAYERS, LEVEL_RUNS, LEVEL_BESTS, DAILY_CHALLENGES, DAILY_SCORES, LEVEL_KEYS,
-    ensureIndexes, challengeOf, publicChallenge, better,
+    ensureIndexes, challengeOf, better,
 } = internals;
 
 /** every skull the game has (the generator's, and IRON, which it leaves out) */
@@ -23,6 +23,8 @@ const DAYS_MAX = 120;
 const ROWS_MAX = 500;
 /** a challenge's fields that a score's settings are checked against */
 const SCORED_FIELDS = ['level', 'difficulty', 'seed', 'skulls', 'version'];
+/** and those its scores were played with that are not sent back with them */
+const PLAYED_FIELDS = [...SCORED_FIELDS, 'randomizer'];
 
 function error(type, status, extra = {}) {
     return { error: { type, ...extra }, status };
@@ -46,11 +48,11 @@ function when(day, now = today()) {
     return day === now ? 'today' : 'future';
 }
 
-/** a challenge as kept, without Mongo's id, with when it is */
+/** a challenge as kept, without Mongo's id (its randomizer, from its settings if kept before it had one) */
 function challengeRow(challenge) {
     if (!challenge) return null;
     const { _id, ...rest } = challenge;
-    return rest;
+    return { ...rest, randomizer: rest.randomizer ?? daily.randomizerFromConfig(rest.config) };
 }
 
 /** a score as kept (every field), its player's hash beside its short id */
@@ -78,6 +80,7 @@ async function getOverview() {
         levels: daily.LEVELS,
         difficulties: daily.DIFFICULTIES,
         skulls: ALL_SKULLS,
+        randomizer: daily.RANDOMIZER_GROUPS,
     };
 }
 
@@ -143,14 +146,15 @@ async function getDay(day, query) {
         opensAt: daily.dayStart(day),
         closesAt: daily.dayEnd(day),
         challenge: challengeRow(challenge),
-        // (what the game is sent of it, as it would be now)
-        asServed: challenge ? publicChallenge(challenge) : null,
         players,
         scores: scores.map((row, index) => scoreRow(row, index + 1)),
     };
 }
 
-/** a challenge's derived fields from its own: the level's title, the difficulty's name, the skulls' settings */
+/**
+ * a challenge's derived fields from its own: the level's title, the
+ * difficulty's name, the lines the game shows and the settings it is sent
+ */
 function normalized(challenge) {
     const level = daily.LEVELS.find((entry) => entry.key === challenge.level);
     const skulls = [...new Set(challenge.skulls)].sort();
@@ -159,11 +163,8 @@ function normalized(challenge) {
         levelTitle: level ? level.title : challenge.levelTitle,
         difficultyName: daily.DIFFICULTIES[challenge.difficulty],
         skulls,
-        config: {
-            ...challenge.config,
-            'game.skulls': skulls.length ? 'true' : 'false',
-            'game.skulls_active': skulls.join(','),
-        },
+        details: daily.challengeDetails(challenge.randomizer),
+        config: daily.challengeConfig(challenge.randomizer, skulls),
         opensAt: daily.dayStart(challenge.day),
         closesAt: daily.dayEnd(challenge.day),
         timeZone: daily.serverTimeZone(),
@@ -202,32 +203,16 @@ function edited(base, body) {
             else next.skulls = body.skulls;
         }
     }
-    if (body.details !== undefined) {
-        if (!Array.isArray(body.details) || body.details.some((line) => typeof line !== 'string')) {
-            errors.push('details is a list of lines');
-        } else next.details = body.details.map((line) => line.slice(0, 63)).filter(Boolean).slice(0, 4);
-    }
-    if (body.config !== undefined) {
-        if (!body.config || typeof body.config !== 'object' || Array.isArray(body.config)) {
-            errors.push('config is an object of settings');
-        } else {
-            const config = {};
-            for (const [name, value] of Object.entries(body.config)) {
-                // (the game takes only the randomizer's and the skulls' of it: community.c)
-                if (!/^game\.(randomizer|skulls|campaign_score)/.test(name)) {
-                    errors.push(`config: ${name} is not a setting the game takes from a challenge`);
-                } else config[name] = String(value);
-            }
-            next.config = config;
-        }
-    }
+    const randomizer = daily.checkedRandomizer(base.randomizer, body.randomizer);
+    errors.push(...randomizer.errors);
+    next.randomizer = randomizer.randomizer;
     return { errors, next };
 }
 
-/** what of the challenge changes the scores' settings (its scores no longer its own) */
+/** what of the challenge its scores were played with changes (its scores no longer its own) */
 function scoredChanges(before, after) {
     if (!before) return [];
-    return SCORED_FIELDS.filter((field) => JSON.stringify(before[field]) !== JSON.stringify(after[field]));
+    return PLAYED_FIELDS.filter((field) => JSON.stringify(before[field]) !== JSON.stringify(after[field]));
 }
 
 /**
@@ -239,8 +224,8 @@ async function setDay(day, body) {
     await ensureIndexes();
     if (!daily.isDayKey(day)) return error('invalid_day', 422);
     const challenges = await collection(DAILY_CHALLENGES);
-    const current = await challenges.findOne({ day });
-    const base = current ? challengeRow(current) : daily.generateChallenge(day, {
+    const current = challengeRow(await challenges.findOne({ day }));
+    const base = current ?? daily.generateChallenge(day, {
         previousLevel: (await challenges.findOne({ day: daily.addDays(day, -1) }))?.level ?? null,
     });
     const { errors, next } = edited(base, body || {});
@@ -253,7 +238,7 @@ async function regenerateDay(day, body) {
     await ensureIndexes();
     if (!daily.isDayKey(day)) return error('invalid_day', 422);
     const challenges = await collection(DAILY_CHALLENGES);
-    const current = await challenges.findOne({ day });
+    const current = challengeRow(await challenges.findOne({ day }));
     const previous = await challenges.findOne({ day: daily.addDays(day, -1) });
     const following = await challenges.findOne({ day: daily.addDays(day, 1) });
     let generated;

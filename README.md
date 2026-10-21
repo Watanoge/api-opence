@@ -55,11 +55,14 @@ from the page). `GET /admin` manages the server, signed in with
 - **Daily challenges**: any day's, before, today's or to come. A day can be
   made now at random (a day to come is otherwise made the first time it is
   asked for), made again, changed by hand (level, difficulty, seed, skulls,
-  the lines the game shows, and the randomizer's and skulls' settings sent to
-  it), or deleted. A day with scores is changed only when asked again, with
-  its scores kept or deleted: a change of its level, difficulty, seed,
-  skulls or version makes them another challenge's, and the games still
-  playing the old one are refused (`settings_mismatch`).
+  and the randomizer: its AI, equipped weapons, world weapons and Crazy Mode,
+  chosen as the game's randomizer screens offer them), or deleted. The
+  lines the game shows and the settings it is sent follow the randomizer
+  and skulls. A day with scores is changed only when asked again, with its
+  scores kept or deleted: a change of its level, difficulty, seed, skulls,
+  version or randomizer makes them another challenge's, and (but for the
+  randomizer, which a score does not send) the games still playing the old
+  one are refused (`settings_mismatch`).
 - **Leaderboards**: each day's and each campaign level's, every field kept;
   a score can be deleted (a level's with its player's runs of it), a run of
   a level deleted (its player's best worked out again from the runs left),

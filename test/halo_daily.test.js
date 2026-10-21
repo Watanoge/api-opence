@@ -37,3 +37,38 @@ test('a challenge never repeats the day before, IRON, or two shield skulls', () 
         assert.strictEqual(challenge.config['game.randomizer'], 'true');
     }
 });
+
+test("a challenge's settings and lines are its randomizer's", () => {
+    for (let index = 0; index < 2000; index++) {
+        const challenge = daily.generateChallenge('2026-10-21', { timeZone: 'UTC' });
+        const { errors, randomizer } = daily.checkedRandomizer(challenge.randomizer, challenge.randomizer);
+        assert.deepStrictEqual(errors, []);
+        assert.deepStrictEqual(randomizer, challenge.randomizer);
+        assert.deepStrictEqual(daily.randomizerFromConfig(challenge.config), challenge.randomizer);
+        assert.deepStrictEqual(challenge.details, daily.challengeDetails(challenge.randomizer));
+    }
+});
+
+test("a randomizer is checked against the game's screens", () => {
+    const base = daily.generateChallenge('2026-10-21', { timeZone: 'UTC' }).randomizer;
+    const elites = daily.checkedRandomizer(base, { enemies: true, pool: 'one', type: 'elite', rank: 'zealot' });
+    assert.deepStrictEqual(elites.errors, []);
+    const config = daily.challengeConfig(elites.randomizer, []);
+    assert.strictEqual(config['game.randomizer_elite_rank'], 'zealot');
+    assert.strictEqual(config['game.randomizer_grunt_rank'], 'any');
+    assert.match(daily.challengeDetails(elites.randomizer)[0], /^ENEMIES: ZEALOT ELITES ONLY/);
+
+    // (a rank the type has not got; a type without ranks has "any")
+    assert.ok(daily.checkedRandomizer(base, { pool: 'one', type: 'grunt', rank: 'zealot' }).errors.length);
+    assert.strictEqual(daily.checkedRandomizer(base, { pool: 'one', type: 'sentinel', rank: 'zealot' }).randomizer.rank, 'any');
+    // (the flamethrower only with Go Crazy's)
+    const flame = { pickups: true, pickupPool: 'one', pickupType: 'flamethrower' };
+    assert.ok(daily.checkedRandomizer(base, { ...flame, crazy: false }).errors.length);
+    assert.deepStrictEqual(daily.checkedRandomizer(base, { ...flame, crazy: true, crazyFlamethrower: true }).errors, []);
+    // (values not the screens', and fields it has not got)
+    assert.ok(daily.checkedRandomizer(base, { enemies: 'true' }).errors.length);
+    assert.ok(daily.checkedRandomizer(base, { crazy: true, crazyPods: 35 }).errors.length);
+    assert.ok(daily.checkedRandomizer(base, { shields: true }).errors.length);
+    // (a field that does not apply is left as it was by default)
+    assert.strictEqual(daily.checkedRandomizer(base, { crazy: false, crazyPods: 35 }).randomizer.crazyPods, 30);
+});
