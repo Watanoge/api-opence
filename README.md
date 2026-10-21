@@ -45,6 +45,31 @@ profile name the game sends with each score.
 | POST | `/daily/:day/scores` | a run of the day's challenge, whenever it is played |
 | PUT | `/daily/:day` | a challenge set by hand (`x-admin-code: HALO_ADMIN_CODE`), for a day with no scores yet |
 
+## Developer portal and management
+
+`GET /` is the developer portal: the server's status, today's challenge and
+leaderboard, the conventions, and every endpoint (the GET ones can be tried
+from the page). `GET /admin` manages the server, signed in with
+`HALO_ADMIN_CODE` (none set: off):
+
+- **Daily challenges**: any day's, before, today's or to come. A day can be
+  made now at random (a day to come is otherwise made the first time it is
+  asked for), made again, changed by hand (level, difficulty, seed, skulls,
+  the lines the game shows, and the randomizer's and skulls' settings sent to
+  it), or deleted. A day with scores is changed only when asked again, with
+  its scores kept or deleted: a change of its level, difficulty, seed,
+  skulls or version makes them another challenge's, and the games still
+  playing the old one are refused (`settings_mismatch`).
+- **Leaderboards**: each day's and each campaign level's, every field kept;
+  a score can be deleted (a level's with its player's runs of it), a run of
+  a level deleted (its player's best worked out again from the runs left),
+  and a day's top three entry taken from a player.
+- **Players**: found by name or id, and deleted with every score of theirs.
+
+Its page calls `/admin/api/...` (`routes/routes_admin.js`) with the code as
+`x-admin-code`; ten wrong codes from one address keep it out for 15 minutes
+(behind a proxy, set `TRUST_PROXY` so the address is the client's).
+
 Answers are `{ "data": ... }`, or `{ "error": { "type": ... } }` with a
 status of 4xx or 5xx. `database` (503) means MongoDB cannot be reached
 (`MONGODB_URI`); `GET /status` says `"database": "ok"` or `"unavailable"`.

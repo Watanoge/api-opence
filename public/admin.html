@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>OpenCE Manage</title>
+<meta name="description" content="Manage OpenCE's daily challenges and leaderboards.">
+<link rel="stylesheet" href="/portal/portal.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="inner">
+    <a class="brand" href="/" style="color:inherit;text-decoration:none"><span class="mark">CE</span> OpenCE API <small>manage</small></a>
+    <nav class="tabs" id="tabs" hidden>
+      <a href="#/overview" data-tab="overview">Overview</a>
+      <a href="#/days" data-tab="days">Daily challenges</a>
+      <a href="#/levels" data-tab="levels">Campaign levels</a>
+      <a href="#/players" data-tab="players">Players</a>
+    </nav>
+    <div class="spacer"></div>
+    <button id="sign-out" hidden>Sign out</button>
+  </div>
+</header>
+
+<main id="view"></main>
+
+<dialog id="confirm">
+  <form method="dialog" class="stack">
+    <h2 id="confirm-title"></h2>
+    <div id="confirm-body" class="small"></div>
+    <div class="row" id="confirm-buttons" style="justify-content:flex-end"></div>
+  </form>
+</dialog>
+
+<script src="/portal/admin.js"></script>
+</body>
+</html>

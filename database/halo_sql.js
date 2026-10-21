@@ -453,6 +453,11 @@ async function setChallenge(day, body) {
 }
 
 module.exports = {
+    // (the developer portal's: database/halo_admin.js)
+    internals: {
+        PLAYERS, LEVEL_RUNS, LEVEL_BESTS, DAILY_CHALLENGES, DAILY_SCORES, LEVEL_KEYS,
+        ensureIndexes, challengeOf, publicChallenge, better, hashKey,
+    },
     getStatus,
     submitLevelScore,
     getLevelLeaderboard,

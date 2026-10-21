@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenCE API</title>
+<meta name="description" content="OpenCE's community server: Halo CE Universal's online leaderboards and daily challenges.">
+<link rel="stylesheet" href="/portal/portal.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="inner">
+    <div class="brand"><span class="mark">CE</span> OpenCE API <small>developer portal</small></div>
+    <div class="spacer"></div>
+    <span id="status-pill" class="badge">checking…</span>
+    <a class="button" href="/admin">Manage</a>
+  </div>
+</header>
+
+<main>
+  <section class="grid stats" id="status-cards">
+    <div class="card stat"><div class="label">API version</div><div class="value" id="s-api">–</div></div>
+    <div class="card stat"><div class="label">Server day</div><div class="value" id="s-day">–</div></div>
+    <div class="card stat"><div class="label">Day ends in</div><div class="value" id="s-ends">–</div></div>
+    <div class="card stat"><div class="label">Database</div><div class="value" id="s-db">–</div></div>
+  </section>
+
+  <section class="grid two">
+    <div class="card">
+      <div class="card-head"><h2>Today's challenge</h2><span class="badge today" id="t-day"></span></div>
+      <div id="today" class="stack muted">Loading…</div>
+    </div>
+    <div class="card flush">
+      <div class="card-head"><h2>Today's leaderboard</h2></div>
+      <div class="table-wrap" id="today-board"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Conventions</h2>
+    <div class="stack small">
+      <p style="margin:0">Every answer is JSON: <code>{ "data": … }</code>, or <code>{ "error": { "type": … } }</code>
+        with a 4xx or 5xx status. <code>database</code> (503) means MongoDB can't be reached.</p>
+      <p style="margin:0">A player is a profile of an install of the game, sent as <code>X-Halo-Key</code>: 32 to 128
+        letters, digits, <code>-</code> or <code>_</code>. The server keeps only its SHA-256. Requests that read a
+        leaderboard or a challenge take it too, to add the key's own place (<code>me</code>, <code>mine</code>).</p>
+      <p style="margin:0">CORS lets every origin in (nothing rides on cookies). A "CORS error" in a browser means the
+        answer didn't come from this server.</p>
+      <p style="margin:0">Daily challenges change at midnight in <code id="c-tz">the server's time zone</code>. A
+        challenge's runs are taken whenever it is played; the day's own top three, while it lasted, are kept on top of
+        its leaderboard (<code>dayTop</code>).</p>
+    </div>
+  </section>
+
+  <section class="card flush">
+    <div class="card-head"><h2>Endpoints</h2><span class="muted small">GET ones can be tried here, without a key</span></div>
+    <div id="endpoints"></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value == null || value === false) continue;
+    if (key === 'class') node.className = value;
+    else if (key.startsWith('on')) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? '' : value);
+  }
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+const time = (seconds) => seconds == null ? '–' :
+  `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+const DIFFICULTIES = ['Easy', 'Normal', 'Heroic', 'Legendary'];
+
+const ENDPOINTS = [
+  ['GET', '/status', "The server's version, time and day, and whether the database answers."],
+  ['GET', '/daily', "Today's challenge (and the key's best of it)."],
+  ['GET', '/daily/history', 'The days before, newest first. ?before=YYYY-MM-DD&limit= (up to 60).', '/daily/history?limit=5'],
+  ['GET', '/daily/:day', "A day's challenge, today's or before (a day to come is not shown).", 'day'],
+  ['GET', '/daily/:day/leaderboard', "A day's leaderboard, with its dayTop. ?limit= (up to 50).", 'day-board'],
+  ['POST', '/daily/:day/scores', "A run of the day's challenge, whenever it is played. Its settings (level, difficulty, seed, version, skullSet) must be the day's, or it is refused (settings_mismatch).", null,
+    '{ "name": "Chief", "level": "a10", "score": 52100, "seconds": 812, "difficulty": 2,\n  "skulls": 4, "skullsPercent": 180, "medals": 41, "kills": 120, "deaths": 2, "players": 1,\n  "platform": "web", "seed": 1931627814, "version": 1,\n  "skullSet": ["assassins", "bandanna", "protected", "scarab"] }'],
+  ['POST', '/levels/scores', 'A campaign level won: its best per player is kept (the most points, then the shortest time), and every run.', null,
+    '{ "name": "Chief", "level": "a10", "score": 100317, "seconds": 456, "difficulty": 3,\n  "skulls": 1, "skullsPercent": 100, "medals": 114, "players": 1, "platform": "windows" }'],
+  ['GET', '/levels/:level/leaderboard', "A campaign level's leaderboard (a10, a30, … d40). ?limit= (up to 50).", '/levels/a10/leaderboard?limit=5'],
+  ['PUT', '/daily/:day', 'A challenge set by hand, for a day with no scores yet (x-admin-code). The portal\'s Manage page does more.'],
+];
+
+let serverDay = null;
+
+function renderEndpoints() {
+  const list = $('endpoints');
+  for (const [method, path, description, sample, body] of ENDPOINTS) {
+    const output = h('pre', { hidden: true });
+    const tryPath = () => {
+      if (sample === 'day') return `/daily/${serverDay}`;
+      if (sample === 'day-board') return `/daily/${serverDay}/leaderboard?limit=5`;
+      return sample || path;
+    };
+    const tryButton = method === 'GET' ? h('button', { class: 'small', onclick: async () => {
+      const target = tryPath();
+      output.hidden = false;
+      output.textContent = `GET ${target}\n…`;
+      try {
+        const answer = await fetch(target);
+        output.textContent = `GET ${target}  →  ${answer.status}\n\n` + JSON.stringify(await answer.json(), null, 2);
+      } catch (error) {
+        output.textContent = `GET ${target}\n\n${error}`;
+      }
+    } }, 'Try') : null;
+    list.append(h('div', { class: 'endpoint' },
+      h('div', { class: 'row' }, h('span', { class: `method ${method}` }, method), h('span', { class: 'path' }, path),
+        h('div', { class: 'spacer' }), tryButton),
+      h('div', { class: 'desc' }, description),
+      body ? h('pre', {}, body) : null,
+      output));
+  }
+}
+
+async function load() {
+  try {
+    const status = (await (await fetch('/status')).json()).data;
+    serverDay = status.day;
+    $('s-api').textContent = `v${status.api}`;
+    $('s-day').textContent = status.day;
+    $('c-tz').textContent = status.timeZone;
+    const left = Math.max(0, new Date(status.dayEndsAt) - new Date(status.serverTime));
+    $('s-ends').textContent = `${Math.floor(left / 3600e3)}h ${Math.floor(left / 60e3) % 60}m`;
+    $('s-db').textContent = status.database === 'ok' ? 'OK' : 'Down';
+    $('status-pill').textContent = status.database === 'ok' ? 'online' : 'database down';
+    $('status-pill').className = `badge ${status.database === 'ok' ? 'good' : 'bad'}`;
+  } catch (error) {
+    $('status-pill').textContent = 'unreachable';
+    $('status-pill').className = 'badge bad';
+  }
+  try {
+    const challenge = (await (await fetch('/daily')).json()).data;
+    $('t-day').textContent = challenge.day;
+    const today = $('today');
+    today.className = 'stack';
+    today.replaceChildren(
+      h('div', {}, h('strong', {}, challenge.levelTitle), ' ', h('span', { class: 'muted' }, `(${challenge.level}) · ${DIFFICULTIES[challenge.difficulty]}`)),
+      h('div', { class: 'small' }, ...challenge.details.map((line) => h('div', {}, line))),
+      h('div', { class: 'row' }, challenge.skulls.length ? challenge.skulls.map((skull) => h('span', { class: 'badge' }, skull.replace(/_/g, ' '))) :
+        h('span', { class: 'muted small' }, 'No skulls')));
+    const board = (await (await fetch(`/daily/${challenge.day}/leaderboard?limit=10`)).json()).data;
+    const rows = board.rows || [];
+    $('today-board').replaceChildren(rows.length ? h('table', {},
+      h('thead', {}, h('tr', {}, h('th', { class: 'num' }, '#'), h('th', {}, 'Player'), h('th', { class: 'num' }, 'Score'), h('th', { class: 'num' }, 'Time'))),
+      h('tbody', {}, rows.map((row) => h('tr', {}, h('td', { class: 'num' }, row.rank), h('td', {}, row.name),
+        h('td', { class: 'num' }, row.score.toLocaleString()), h('td', { class: 'num' }, time(row.seconds))))))
+      : h('div', { class: 'empty' }, 'No runs yet today.'));
+  } catch (error) {
+    $('today').textContent = 'The challenge could not be loaded.';
+  }
+}
+
+renderEndpoints();
+load();
+</script>
+</body>
+</html>
