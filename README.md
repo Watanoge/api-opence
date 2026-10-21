@@ -26,9 +26,10 @@ profile name the game sends with each score.
 - **Daily challenges**: one a day, made the first time the day is asked for
   (`utils/halo_daily.js`): a campaign level, a difficulty, the randomizer's
   setup, skulls, and a seed every player's randomizer uses, so everyone meets
-  the same enemies. Its leaderboard takes scores until the day ends at
-  midnight in `HALO_DAILY_TIMEZONE`; past days can still be read and played.
-  A score whose settings are not the day's is refused.
+  the same enemies. Its leaderboard takes scores whenever it is played, and
+  keeps the top three of the day itself (until midnight in
+  `HALO_DAILY_TIMEZONE`) on top (`dayTop`). A score whose settings are not
+  the day's is refused.
 
 ## Endpoints
 
@@ -41,7 +42,7 @@ profile name the game sends with each score.
 | GET | `/daily/history` | `?before=YYYY-MM-DD&limit=` (up to 60) |
 | GET | `/daily/:day` | a day's challenge, today's or before |
 | GET | `/daily/:day/leaderboard` | `?limit=` |
-| POST | `/daily/:day/scores` | a run of the day's challenge, until the day ends |
+| POST | `/daily/:day/scores` | a run of the day's challenge, whenever it is played |
 | PUT | `/daily/:day` | a challenge set by hand (`x-admin-code: HALO_ADMIN_CODE`), for a day with no scores yet |
 
 Answers are `{ "data": ... }`, or `{ "error": { "type": ... } }` with a

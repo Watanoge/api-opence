@@ -9,7 +9,7 @@
  *   GET  /daily/history                   ?before=YYYY-MM-DD&limit=
  *   GET  /daily/:day                      a past day's challenge
  *   GET  /daily/:day/leaderboard          ?limit=
- *   POST /daily/:day/scores               taken until the day ends
+ *   POST /daily/:day/scores               taken whenever it is played
  *   PUT  /daily/:day                      x-admin-code: HALO_ADMIN_CODE
  */
 const express = require('express');

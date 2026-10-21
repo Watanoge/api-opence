@@ -296,8 +296,8 @@ function generateChallenge(dayKey, { previousLevel = null, random = cryptoRandom
 
     const details = [
         `ENEMIES: ${enemiesLabel}${allies ? ', ALLIES TOO' : ''}`,
-        `ENEMY WEAPONS: ${weapons ? weapons.label : 'AS THE LEVEL HAS THEM'}`,
-        `PICKUPS: ${pickups ? pickups.label : 'AS THE LEVEL HAS THEM'}`,
+        `ENEMY WEAPONS: ${weapons ? weapons.label : 'NOT RANDOMIZED'}`,
+        `PICKUPS: ${pickups ? pickups.label : 'NOT RANDOMIZED'}`,
     ];
     if (crazy) details.push('GO CRAZY: ON');
 

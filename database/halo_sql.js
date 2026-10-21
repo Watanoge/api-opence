@@ -12,8 +12,9 @@
  *   time, difficulty, skulls and medals with it)
  * - daily_challenges: each day's challenge (utils/halo_daily.js), made the
  *   first time the day is asked for, and never changed once it has scores
- * - daily_scores: each player's best of each day's challenge, taken only
- *   until the day ends (server time: HALO_DAILY_TIMEZONE)
+ * - daily_scores: each player's best of each day's challenge, taken whenever
+ *   it is played; and (dayBest) their best while the day lasted (server time:
+ *   HALO_DAILY_TIMEZONE), whose top three the day's leaderboard keeps on top
  */
 const crypto = require('crypto');
 const { collection } = require('./db');
@@ -32,6 +33,8 @@ const MINIMUM_CLIENT_API = 1;
 const NAME_MAX_LEN = 32;
 const LEADERBOARD_MAX = 50;
 const HISTORY_MAX = 60;
+/** the day's best while it lasted, kept on top of its leaderboard */
+const DAY_TOP = 3;
 /** the shortest time between two scores of one player (a replay of the same win) */
 const SUBMIT_INTERVAL_MS = 3000;
 
@@ -356,6 +359,13 @@ async function getChallengeHistory(query, key) {
     };
 }
 
+/** the day's top three while it lasted (dayBest), with their place among them */
+async function dayTop(day) {
+    const rows = await (await collection(DAILY_SCORES)).find({ day, 'dayBest.score': { $exists: true } })
+        .sort({ 'dayBest.score': -1, 'dayBest.seconds': 1, 'dayBest.achievedAt': 1 }).limit(DAY_TOP).toArray();
+    return rows.map((row, index) => publicRow({ ...row, ...row.dayBest }, index + 1));
+}
+
 async function getChallengeLeaderboard(day, query, key) {
     await ensureIndexes();
     if (!daily.isDayKey(day)) return error('invalid_day', 422);
@@ -363,7 +373,13 @@ async function getChallengeLeaderboard(day, query, key) {
     if (!challenge || day > daily.dayKeyAt(new Date())) return error('not_found', 404);
     const limit = parseLimit(query?.limit, 10, LEADERBOARD_MAX);
     const result = await board(DAILY_SCORES, { day }, limit, parseKey(key));
-    return { day, open: new Date() < new Date(challenge.closesAt), closesAt: challenge.closesAt, ...result };
+    return {
+        day,
+        open: new Date() < new Date(challenge.closesAt),
+        closesAt: challenge.closesAt,
+        dayTop: await dayTop(day),
+        ...result,
+    };
 }
 
 /** the settings the game says it played with are the challenge's (skullSet: the skulls' names) */
@@ -389,9 +405,8 @@ async function submitChallengeScore(day, key, body) {
     const challenge = await challengeOf(day);
     if (!challenge || day > daily.dayKeyAt(new Date())) return error('not_found', 404);
     const now = new Date();
-    if (now >= new Date(challenge.closesAt)) {
-        return error('closed', 409, { closesAt: challenge.closesAt });
-    }
+    // (taken whenever it is played; while the day lasts, its day's best too)
+    const open = now < new Date(challenge.closesAt);
     if (!settingsMatch(challenge, { ...body, difficulty: run.difficulty })) {
         return error('settings_mismatch', 422);
     }
@@ -401,13 +416,18 @@ async function submitChallengeScore(day, key, body) {
     const scores = await collection(DAILY_SCORES);
     const best = await scores.findOne({ day, player });
     const improved = better(run, best);
+    const dayImproved = open && better(run, best?.dayBest);
     await scores.updateOne({ day, player }, {
-        $set: { name, lastRunAt: now, ...client, ...(improved ? { ...run, achievedAt: now } : {}) },
+        $set: {
+            name, lastRunAt: now, ...client,
+            ...(improved ? { ...run, achievedAt: now } : {}),
+            ...(dayImproved ? { dayBest: { ...run, achievedAt: now } } : {}),
+        },
         $inc: { attempts: 1 },
     }, { upsert: true });
 
     const standing = await board(DAILY_SCORES, { day }, 1, parsedKey);
-    return { recorded: true, improved, me: standing.me, players: standing.players };
+    return { recorded: true, improved, open, me: standing.me, players: standing.players };
 }
 
 /**
