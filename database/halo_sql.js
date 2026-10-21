@@ -1,9 +1,11 @@
 /**
  * Halo CE Universal's online leaderboards and daily challenges.
  *
- * A player is an install of the game: a random secret key it makes on first
- * use (sent as X-Halo-Key), kept here only as its SHA-256. The name shown is
- * the profile name the game sends with each score.
+ * A player is a profile of an install of the game: a random secret key the
+ * install makes on first use, with a hash of the profile's name after it (sent
+ * as X-Halo-Key, so split screen's players are each their own), kept here only
+ * as its SHA-256. The name shown is the profile name the game sends with each
+ * score. A run says how many players its game had (co-op's are its players').
  *
  * - level_runs: every campaign level won and sent, as it came
  * - level_bests: each player's best of each level (the most points; its
@@ -107,6 +109,8 @@ function parseRun(body) {
         medals: parseInteger(body?.medals ?? 0, 0, 1000000),
         kills: parseInteger(body?.kills ?? 0, 0, 1000000),
         deaths: parseInteger(body?.deaths ?? 0, 0, 1000000),
+        // (the game's players: 1 alone, more in co-op, split screen or online)
+        players: parseInteger(body?.players ?? 1, 1, 16),
     };
     for (const [field, value] of Object.entries(run)) {
         if (value === null) errors.push(`${field} is missing or out of range`);
@@ -160,6 +164,7 @@ function publicRow(document, rank) {
         skulls: document.skulls,
         skullsPercent: document.skullsPercent,
         medals: document.medals,
+        players: document.players ?? 1,
         at: document.achievedAt,
     };
 }
