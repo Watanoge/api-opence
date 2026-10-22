@@ -1,6 +1,6 @@
 # api-opence
 
-OpenCE's community server: [Halo CE Universal](https://github.com/thelinkin3000/halo-ce-universal)'s
+OpenCE's community server: [Open CE Ultimate Campaign](https://github.com/Watanoge/open-ce-ultimate-campaign)'s
 online leaderboards and daily challenges. The game asks it at `community.server`
 (default `https://oceapi.watanoge.com`); its own code is `port/linux/game/community.c`.
 
