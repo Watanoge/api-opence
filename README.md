@@ -107,11 +107,14 @@ profile name the game sends with each score.
   sends (multiplayer and campaign: matches, wins, kills, deaths, assists,
   medals, each medal's count) and each one as it came (`account_matches`, a
   match sent twice taken once by its `matchId`).
-- **Chat**: the fork's chat lines, numbered in order and kept 14 days:
-  global, a match's (its `room`, a key the game makes for the game it is in)
-  and its teams', and private ones between two accounts (by code). An account
-  says 5 lines at once, then one each 1.5 seconds. A room knows the accounts
-  that polled it in the last 30 seconds (in memory).
+- **Chat**: the fork's chat lines, as IRC has them: no history. A line is
+  kept 10 minutes (long enough for every client's next poll, then MongoDB's
+  TTL drops it), and a client's first poll hears nothing said before it,
+  only where to go on from. Global, a match's (its `room`, a key the game
+  makes for the game it is in) and its teams', and private ones between two
+  accounts (by code). An account says 5 lines at once, then one each 1.5
+  seconds. A room knows the accounts that polled it in the last 30 seconds
+  (in memory).
 - **Friends** (`friendships`): one asks, the other accepts (or asks back).
   An account is online while it was heard from in the last 2 minutes (the
   game's `POST /presence` every 45 seconds: what it is doing, and the invite
@@ -144,7 +147,7 @@ profile name the game sends with each score.
 | POST | `/account/matches` | a match or level played: `{matchId, kind: multiplayer\|campaign, result, score, kills, deaths, assists, suicides, betrayals, seconds, players, place, map, gametype, teams, medals: {key: count}, name}` |
 | GET | `/account/matches` | `?limit=` (up to 50) the latest |
 | POST | `/chat/messages` | a line: `{channel: global\|match\|team\|private, text, room, team, to, name}` |
-| GET | `/chat/messages` | `?after=&room=&team=&global=0&reported=1&name=` the lines heard since `after` (none: the last 30), the cursor, and the room's players |
+| GET | `/chat/messages` | `?after=&room=&team=&global=0&reported=1&name=` the lines heard since `after` (none: no lines, only the cursor to go on from), and the room's players |
 | POST | `/presence` | what the game is doing: `{state: menus\|campaign\|multiplayer\|theater, map, gametype, game, players, maximum, host, invite, name}`; the friends online and the requests waiting |
 | GET | `/friends` | the friends (online first) and what they do, the requests to and from the account |
 | POST | `/friends` | `{code}` asked to be its friend (accepted at once when it asked first) |
