@@ -99,6 +99,19 @@ profile name the game sends with each score.
   keeps the top three of the day itself (until midnight in
   `HALO_DAILY_TIMEZONE`) on top (`dayTop`). A score whose settings are not
   the day's is refused.
+- **Accounts** (`database/halo_social.js`): an account is an install, whatever
+  its players' names: the same key without the profile's part after it
+  (`<64 hex>-<profile>` is the install's `<64 hex>`). No one registers; the
+  first request makes it, with a public code (`XXXX-XXXX`, Crockford's base
+  32) others know it by. It keeps the totals of every match and level the game
+  sends (multiplayer and campaign: matches, wins, kills, deaths, assists,
+  medals, each medal's count) and each one as it came (`account_matches`, a
+  match sent twice taken once by its `matchId`).
+- **Chat**: the fork's chat lines, numbered in order and kept 14 days:
+  global, a match's (its `room`, a key the game makes for the game it is in)
+  and its teams', and private ones between two accounts (by code). An account
+  says 5 lines at once, then one each 1.5 seconds. A room knows the accounts
+  that polled it in the last 30 seconds (in memory).
 
 ## Endpoints
 
@@ -113,6 +126,12 @@ profile name the game sends with each score.
 | GET | `/daily/:day/leaderboard` | `?limit=` |
 | POST | `/daily/:day/scores` | a run of the day's challenge, whenever it is played |
 | PUT | `/daily/:day` | a challenge set by hand (`x-admin-code: HALO_ADMIN_CODE`), for a day with no scores yet |
+| POST | `/account` | the game started: the account (made the first time), its totals and medals; `{name, platform, build}` |
+| GET | `/account` | the same, without noting the name |
+| POST | `/account/matches` | a match or level played: `{matchId, kind: multiplayer\|campaign, result, score, kills, deaths, assists, suicides, betrayals, seconds, players, place, map, gametype, teams, medals: {key: count}, name}` |
+| GET | `/account/matches` | `?limit=` (up to 50) the latest |
+| POST | `/chat/messages` | a line: `{channel: global\|match\|team\|private, text, room, team, to, name}` |
+| GET | `/chat/messages` | `?after=&room=&team=&global=0&name=` the lines heard since `after` (none: the last 30), the cursor, and the room's players |
 
 ## Developer portal and management
 
