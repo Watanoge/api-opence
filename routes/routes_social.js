@@ -5,11 +5,13 @@
  *
  *   POST /account                 the game started: the account, made the first time; {settings}
  *   GET  /account                 the account, its totals, medals and settings
+ *   POST /account/code            its friend code drawn anew (once a minute at most)
  *   POST /account/matches         a match or a level played
  *   GET  /account/matches         ?limit= the latest
  *   POST /chat/messages           a line: global, match, team or private
  *   GET  /chat/messages           ?after=&room=&team=&global=0&reported=1&name= the lines heard since
  *   POST /presence                what the game is doing; the friends online, the requests waiting
+ *   POST /presence/offline        the game closed (the key as X-Halo-Key or as the text body: a tab's beacon)
  *   GET  /friends                 the friends and what they do, the requests to and from it
  *   POST /friends                 {code} asked to be its friend (accepted, when it asked first)
  *   POST /friends/accept          {code} its request accepted
@@ -27,11 +29,13 @@ const express = require('express');
 const {
     hello,
     getAccount,
+    changeCode,
     submitMatch,
     getMatches,
     sendChat,
     pollChat,
     setPresence,
+    setOffline,
     getFriends,
     requestFriend,
     acceptFriend,
@@ -72,6 +76,9 @@ router.post('/account', respond('POST /account',
 router.get('/account', respond('GET /account',
     (req) => getAccount(accountKey(req))));
 
+router.post('/account/code', respond('POST /account/code',
+    (req) => changeCode(accountKey(req))));
+
 router.post('/account/matches', respond('POST /account/matches',
     (req) => submitMatch(accountKey(req), req.body)));
 
@@ -86,6 +93,11 @@ router.get('/chat/messages', respond('GET /chat/messages',
 
 router.post('/presence', respond('POST /presence',
     (req) => setPresence(accountKey(req), req.body)));
+
+// (a browser's tab closing: navigator.sendBeacon, which sends no headers of
+// its own, the key as the text body)
+router.post('/presence/offline', express.text({ type: () => true, limit: '1kb' }), respond('POST /presence/offline',
+    (req) => setOffline(accountKey(req) || (typeof req.body === 'string' ? req.body : ''))));
 
 router.get('/friends', respond('GET /friends',
     (req) => getFriends(accountKey(req))));
