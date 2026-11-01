@@ -48,9 +48,38 @@ test('a match is checked and adds to its kind', () => {
     assert.ok(social.parseMatch({ matchId: 'abcdef0123', kind: 'campaign', result: 'draw' }).errors.length);
 });
 
+test('a match left before its end counts its figures, a quit as a quit, never a result', () => {
+    const quit = social.parseMatch({
+        matchId: 'abcdef0123456789', kind: 'multiplayer', result: 'loss', completed: false, endReason: 'quit',
+        kills: 4, deaths: 6, seconds: 300, medals: { double_kill: 1 },
+    });
+    assert.deepStrictEqual(quit.errors, []);
+    assert.strictEqual(quit.match.result, null);
+    assert.strictEqual(quit.match.completed, false);
+    assert.strictEqual(quit.match.endReason, 'quit');
+    const increments = social.matchIncrements(quit.match);
+    assert.strictEqual(increments['stats.multiplayer.matches'], 1);
+    assert.strictEqual(increments['stats.multiplayer.quits'], 1);
+    assert.strictEqual(increments['stats.multiplayer.kills'], 4);
+    assert.strictEqual(increments['medals.double_kill'], 1);
+    assert.strictEqual(increments['stats.multiplayer.losses'], undefined);
+
+    const ended = social.parseMatch({ matchId: 'abcdef0123456789', kind: 'multiplayer', completed: false, endReason: 'ended' });
+    assert.deepStrictEqual(ended.errors, []);
+    assert.strictEqual(social.matchIncrements(ended.match)['stats.multiplayer.quits'], undefined);
+
+    const done = social.parseMatch({ matchId: 'abcdef0123456789', kind: 'multiplayer', result: 'win', endReason: 'quit' });
+    assert.strictEqual(done.match.completed, true);
+    assert.strictEqual(done.match.endReason, null);
+    assert.strictEqual(social.matchIncrements(done.match)['stats.multiplayer.quits'], undefined);
+
+    assert.ok(social.parseMatch({ matchId: 'abcdef0123', kind: 'multiplayer', completed: false }).errors.length);
+    assert.ok(social.parseMatch({ matchId: 'abcdef0123', kind: 'multiplayer', completed: false, endReason: 'rage' }).errors.length);
+});
+
 test('totals read zero where none was kept', () => {
     assert.deepStrictEqual(social.publicTotals({ kills: 3 }), {
-        matches: 0, wins: 0, losses: 0, ties: 0, score: 0, kills: 3, deaths: 0, assists: 0, suicides: 0,
+        matches: 0, wins: 0, losses: 0, ties: 0, quits: 0, score: 0, kills: 3, deaths: 0, assists: 0, suicides: 0,
         betrayals: 0, seconds: 0, medals: 0,
     });
 });

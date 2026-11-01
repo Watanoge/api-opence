@@ -83,14 +83,21 @@ async function exercise(social) {
 
     // (activity: a friend's match)
     await social.submitMatch(key('b'), { matchId: 'match00000001', kind: 'multiplayer', result: 'win', kills: 9, map: 'bloodgulch' });
+    // (a match left before its end: not in the activity)
+    await social.submitMatch(key('b'), { matchId: 'match00000002', kind: 'multiplayer', completed: false, endReason: 'quit', kills: 2 });
     const activity = await social.getActivity(key('a'), {});
     assert.strictEqual(activity.activity.length, 1);
     assert.strictEqual(activity.activity[0].code, codeTwo);
     assert.strictEqual(activity.activity[0].matchId, undefined);
     const player = await social.getPlayer(key('a'), codeTwo, {});
     assert.strictEqual(player.player.relation, 'friends');
-    assert.strictEqual(player.player.stats.multiplayer.kills, 9);
-    assert.strictEqual(player.matches.length, 1);
+    assert.strictEqual(player.player.stats.multiplayer.kills, 11);
+    assert.strictEqual(player.player.stats.multiplayer.quits, 1);
+    assert.strictEqual(player.player.stats.multiplayer.wins, 1);
+    // (its history: the match left before its end too, as it ended)
+    assert.strictEqual(player.matches.length, 2);
+    assert.strictEqual(player.matches[0].endReason, 'quit');
+    assert.strictEqual(player.matches[0].result, null);
     await social.hello(key('b'), { settings: { activity: false } });
     assert.strictEqual((await social.getActivity(key('a'), {})).activity.length, 0);
     assert.strictEqual((await social.getPlayer(key('a'), codeTwo, {})).matches.length, 0);

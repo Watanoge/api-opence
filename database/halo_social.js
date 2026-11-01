@@ -12,7 +12,11 @@
  * - accounts: the account, its totals (stats.multiplayer, stats.campaign)
  *   and each medal's count (medals.<key>)
  * - account_matches: every match and level the game sent, as it came (a
- *   match sent twice, by its matchId, is taken once)
+ *   match sent twice, by its matchId, is taken once). A match left before
+ *   its end (completed false) has no result and says why (endReason: quit,
+ *   ended, disconnected): its kills and medals count, a quit counts as a
+ *   quit (stats.<kind>.quits), never as a win or a loss, and friends'
+ *   activity does not show it
  * - chat_messages: the fork's chat lines, numbered in order (seq, from
  *   counters' "chat"), kept only CHAT_KEEP_MINUTES (as IRC: no history, a
  *   line is there for the polls that follow it): global ones, a match's (its room,
@@ -49,6 +53,7 @@ const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const CODE_LENGTH = 8;
 const MATCH_KINDS = new Set(['multiplayer', 'campaign']);
 const MATCH_RESULTS = new Set(['win', 'loss', 'tie']);
+const MATCH_END_REASONS = new Set(['quit', 'ended', 'disconnected']);
 const MATCH_HISTORY_MAX = 50;
 const MEDAL_KEYS_MAX = 64;
 
@@ -230,6 +235,9 @@ function parseMatch(body) {
     if (!matchId) errors.push('matchId is required');
     const result = body?.result === undefined || body?.result === null ? null : body.result;
     if (result !== null && !MATCH_RESULTS.has(result)) errors.push('result must be win, loss or tie');
+    const completed = body?.completed !== false;
+    const endReason = completed ? null : body?.endReason;
+    if (!completed && !MATCH_END_REASONS.has(endReason)) errors.push('endReason must be quit, ended or disconnected');
     const figures = {
         score: parseInteger(body?.score ?? 0, -10000000, 100000000),
         kills: parseInteger(body?.kills ?? 0, 0, 100000),
@@ -251,7 +259,10 @@ function parseMatch(body) {
         match: {
             matchId,
             kind,
-            result,
+            // (one left before its end: no result)
+            result: completed ? result : null,
+            completed,
+            endReason,
             ...figures,
             teams: body?.teams === true,
             network: parseLabel(body?.network, 16),
@@ -283,6 +294,7 @@ function matchIncrements(match) {
     if (match.result === 'win') increments[`${prefix}.wins`] = 1;
     else if (match.result === 'loss') increments[`${prefix}.losses`] = 1;
     else if (match.result === 'tie') increments[`${prefix}.ties`] = 1;
+    if (match.endReason === 'quit') increments[`${prefix}.quits`] = 1;
     for (const [key, count] of Object.entries(match.medals)) {
         increments[`medals.${key}`] = count;
         increments[`${prefix}.medals`] = (increments[`${prefix}.medals`] || 0) + count;
@@ -292,7 +304,7 @@ function matchIncrements(match) {
 
 /** a kind's totals as the game reads them (zeros for none) */
 function publicTotals(totals = {}) {
-    const fields = ['matches', 'wins', 'losses', 'ties', 'score', 'kills', 'deaths', 'assists', 'suicides',
+    const fields = ['matches', 'wins', 'losses', 'ties', 'quits', 'score', 'kills', 'deaths', 'assists', 'suicides',
         'betrayals', 'seconds', 'medals'];
     return Object.fromEntries(fields.map((field) => [field, totals[field] || 0]));
 }
@@ -870,7 +882,8 @@ async function getPlayer(key, code, query) {
     };
 }
 
-/** (GET /activity) the friends' latest matches and levels (those whose activity is on) */
+/** (GET /activity) the friends' latest matches and levels (those whose activity is on;
+ * not a match left before its end) */
 async function getActivity(key, query) {
     await ensureIndexes();
     const parsedKey = accountKey(key);
@@ -881,7 +894,7 @@ async function getActivity(key, query) {
         .filter((other) => settingsOf(other).activity && settingsOf(other).friends);
     if (!others.length) return { activity: [] };
     const byHash = new Map(others.map((other) => [other.keyHash, other]));
-    const rows = await (await collection(ACCOUNT_MATCHES)).find({ account: { $in: [...byHash.keys()] } })
+    const rows = await (await collection(ACCOUNT_MATCHES)).find({ account: { $in: [...byHash.keys()] }, completed: { $ne: false } })
         .sort({ playedAt: -1 }).limit(parseLimit(query?.limit, 30, ACTIVITY_MAX)).toArray();
     return {
         activity: rows.map((row) => ({
