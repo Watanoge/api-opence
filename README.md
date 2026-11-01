@@ -112,6 +112,19 @@ profile name the game sends with each score.
   and its teams', and private ones between two accounts (by code). An account
   says 5 lines at once, then one each 1.5 seconds. A room knows the accounts
   that polled it in the last 30 seconds (in memory).
+- **Friends** (`friendships`): one asks, the other accepts (or asks back).
+  An account is online while it was heard from in the last 2 minutes (the
+  game's `POST /presence` every 45 seconds: what it is doing, and the invite
+  of the game it hosts). Its settings (`settings`, sent with `POST /account`,
+  each on until set): `friends` (its friend list: off, it shows offline and
+  takes no requests), `requests` (others may ask), `activity` (friends see
+  what it plays and its matches), `join` (friends get its invite),
+  `privateChat` (private lines reach it).
+- **Moderation**: an account mutes (their lines never reach it), blocks
+  (neither hears the other, no private lines or requests either way, their
+  friendship ended) and reports (`account_reports`, once each; it mutes too).
+  A player reported by 3 accounts or more has its lines hidden from everyone
+  who did not ask for them (`reported=1`, which marks them).
 
 ## Endpoints
 
@@ -131,7 +144,16 @@ profile name the game sends with each score.
 | POST | `/account/matches` | a match or level played: `{matchId, kind: multiplayer\|campaign, result, score, kills, deaths, assists, suicides, betrayals, seconds, players, place, map, gametype, teams, medals: {key: count}, name}` |
 | GET | `/account/matches` | `?limit=` (up to 50) the latest |
 | POST | `/chat/messages` | a line: `{channel: global\|match\|team\|private, text, room, team, to, name}` |
-| GET | `/chat/messages` | `?after=&room=&team=&global=0&name=` the lines heard since `after` (none: the last 30), the cursor, and the room's players |
+| GET | `/chat/messages` | `?after=&room=&team=&global=0&reported=1&name=` the lines heard since `after` (none: the last 30), the cursor, and the room's players |
+| POST | `/presence` | what the game is doing: `{state: menus\|campaign\|multiplayer\|theater, map, gametype, game, players, maximum, host, invite, name}`; the friends online and the requests waiting |
+| GET | `/friends` | the friends (online first) and what they do, the requests to and from the account |
+| POST | `/friends` | `{code}` asked to be its friend (accepted at once when it asked first) |
+| POST | `/friends/accept` | `{code}` its request accepted |
+| POST | `/friends/remove` | `{code}` a friend removed, a request declined or taken back |
+| GET | `/players/:code` | `?matches=` (up to 20) a player: totals, medals, presence, latest matches, and what it is to the one asking |
+| GET | `/activity` | `?limit=` (up to 50) the friends' latest matches and levels |
+| GET | `/moderation` | the accounts muted and blocked |
+| POST | `/moderation` | `{code, action: mute\|unmute\|block\|unblock\|report, reason}` |
 
 ## Developer portal and management
 

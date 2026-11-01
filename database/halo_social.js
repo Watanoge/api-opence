@@ -17,6 +17,18 @@
  *   counters' "chat"), kept CHAT_KEEP_DAYS: global ones, a match's (its room,
  *   a key the game makes for the game it is in) and its teams', and private
  *   ones between two accounts
+ * - friendships: two accounts (a and b, their pair's key the two hashes in
+ *   order), asked for by one of them (requester), pending until the other
+ *   accepts
+ * - account_reports: an account reported by another, once each
+ *
+ * An account also keeps its social settings (settings.<field>, SETTING_FIELDS,
+ * all on until the game says otherwise), what it is doing (presence: the
+ * game's POST /presence, a while apart; online while lastSeenAt is recent),
+ * the accounts it muted and blocked (muted, blocked: their hashes) and how
+ * many accounts reported it (reports). A line of one muted or blocked, or of
+ * one that blocked the listener, is never heard; one of an account reported
+ * by REPORTED_HIDE_COUNT accounts or more only when asked for (reported=1).
  *
  * A match's room also knows who is in it: the accounts polling it lately,
  * kept in memory (the private chat's list of players there).
@@ -28,6 +40,8 @@ const ACCOUNTS = 'accounts';
 const ACCOUNT_MATCHES = 'account_matches';
 const CHAT_MESSAGES = 'chat_messages';
 const COUNTERS = 'counters';
+const FRIENDSHIPS = 'friendships';
+const ACCOUNT_REPORTS = 'account_reports';
 
 const NAME_MAX_LEN = 32;
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -50,6 +64,25 @@ const CHAT_REFILL_MS = 1500;
 const ROOM_MEMBER_MS = 30000;
 const ROOM_KEY_PATTERN = /^[A-Za-z0-9:._-]{1,96}$/;
 
+/** an account's social settings, each on until the game says otherwise:
+ * friends (its friend list), requests (others may ask to be its friend),
+ * activity (its friends see what it plays), join (its friends may join the
+ * game it hosts: its invite), privateChat (private lines reach it) */
+const SETTING_FIELDS = ['friends', 'requests', 'activity', 'join', 'privateChat'];
+/** an account is online while it was heard from this lately (the game's
+ * presence comes every 45 seconds, its chat's polls more often) */
+const ONLINE_MS = 120000;
+const PRESENCE_STATES = new Set(['menus', 'campaign', 'multiplayer', 'theater']);
+const INVITE_MAX_LEN = 160;
+const FRIENDS_MAX = 200;
+const MODERATION_MAX = 500;
+const REPORT_REASON_MAX = 120;
+/** a player's lines are hidden (unless asked for) once this many accounts reported it */
+const REPORTED_HIDE_COUNT = 3;
+const ACTIVITY_MAX = 50;
+const PLAYER_MATCHES_MAX = 20;
+const MODERATION_ACTIONS = new Set(['mute', 'unmute', 'block', 'unblock', 'report']);
+
 let indexesEnsured = null;
 const chatRates = new Map();
 const rooms = new Map();
@@ -70,6 +103,13 @@ function ensureIndexes() {
             await messages.createIndex({ toHash: 1, seq: 1 });
             await messages.createIndex({ fromHash: 1, seq: 1 });
             await messages.createIndex({ at: 1 }, { expireAfterSeconds: CHAT_KEEP_DAYS * 86400 });
+            await accounts.createIndex({ blocked: 1 });
+            const friendships = await collection(FRIENDSHIPS);
+            await friendships.createIndex({ pair: 1 }, { unique: true });
+            await friendships.createIndex({ a: 1 });
+            await friendships.createIndex({ b: 1 });
+            const reports = await collection(ACCOUNT_REPORTS);
+            await reports.createIndex({ from: 1, target: 1 }, { unique: true });
         })().catch((error) => {
             indexesEnsured = null;
             throw error;
@@ -255,14 +295,34 @@ function publicAccount(account) {
     };
 }
 
+/** the settings as the game sends them ({ field: true|false }, those it has), null for none */
+function parseSettings(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const settings = {};
+    for (const field of SETTING_FIELDS) {
+        if (typeof value[field] === 'boolean') settings[field] = value[field];
+    }
+    return Object.keys(settings).length ? settings : null;
+}
+
+/** an account's settings, each one it never set on */
+function settingsOf(account) {
+    return Object.fromEntries(SETTING_FIELDS.map((field) => [field, account?.settings?.[field] !== false]));
+}
+
+/** an account as the game shows its own: its totals, and its settings */
+function ownAccount(account) {
+    return { ...publicAccount(account), settings: settingsOf(account) };
+}
+
 // ---------- accounts
 
 /** the account of the key: made the first time (with a code of its own), its name and client noted */
-async function accountOf(key, { name = null, client = {}, create = true } = {}) {
+async function accountOf(key, { name = null, client = {}, create = true, extra = {} } = {}) {
     const keyHash = hashKey(key);
     const accounts = await collection(ACCOUNTS);
     const now = new Date();
-    const set = { lastSeenAt: now };
+    const set = { lastSeenAt: now, ...extra };
     if (name) set.name = name;
     if (client.platform) set.platform = client.platform;
     if (client.build) set.build = client.build;
@@ -272,7 +332,7 @@ async function accountOf(key, { name = null, client = {}, create = true } = {}) 
     // (a new account: its code drawn again in the rare case another has it)
     for (let attempt = 0; attempt < 5; attempt++) {
         try {
-            const account = { keyHash, code: newCode(), ...set, createdAt: now, stats: {}, medals: {} };
+            const account = { keyHash, code: newCode(), ...unflatten(set), createdAt: now, stats: {}, medals: {} };
             await accounts.insertOne(account);
             return account;
         } catch (err) {
@@ -285,6 +345,23 @@ async function accountOf(key, { name = null, client = {}, create = true } = {}) 
     throw new Error('could not make an account code');
 }
 
+/** $set's dotted fields ("settings.friends") as the object they make, for a new document */
+function unflatten(set) {
+    const document = {};
+    for (const [path, value] of Object.entries(set)) {
+        const parts = path.split('.');
+        let at = document;
+        for (const part of parts.slice(0, -1)) at = at[part] = at[part] || {};
+        at[parts[parts.length - 1]] = value;
+    }
+    return document;
+}
+
+/** the settings sent as $set's fields */
+function settingsSet(settings) {
+    return settings ? Object.fromEntries(Object.entries(settings).map(([field, on]) => [`settings.${field}`, on])) : {};
+}
+
 async function hello(key, body) {
     await ensureIndexes();
     const parsedKey = accountKey(key);
@@ -295,15 +372,16 @@ async function hello(key, body) {
             platform: typeof body?.platform === 'string' ? body.platform.slice(0, 32) : undefined,
             build: parseInteger(body?.build ?? 0, 0, 100000000) ?? 0,
         },
+        extra: settingsSet(parseSettings(body?.settings)),
     });
-    return { account: publicAccount(account) };
+    return { account: ownAccount(account) };
 }
 
 async function getAccount(key) {
     await ensureIndexes();
     const parsedKey = accountKey(key);
     if (!parsedKey) return error('unauthorized', 401);
-    return { account: publicAccount(await accountOf(parsedKey)) };
+    return { account: ownAccount(await accountOf(parsedKey)) };
 }
 
 async function submitMatch(key, body) {
@@ -374,13 +452,13 @@ function parseRoom(value) {
 }
 
 /** a room's players, as polls note them (the account's code, name and team) */
-function roomNote(room, code, name, team, now = Date.now()) {
+function roomNote(room, code, name, team, now = Date.now(), keyHash = null) {
     let members = rooms.get(room);
     if (!members) {
         members = new Map();
         rooms.set(room, members);
     }
-    members.set(code, { code, name, team, at: now });
+    members.set(code, { code, name, team, at: now, keyHash });
 }
 
 function roomMembers(room, now = Date.now()) {
@@ -393,7 +471,12 @@ function roomMembers(room, now = Date.now()) {
         rooms.delete(room);
         return [];
     }
-    return [...members.values()].map(({ code, name, team }) => ({ code, name, team }));
+    return [...members.values()].map(({ code, name, team, keyHash }) => ({ code, name, team, keyHash }));
+}
+
+/** a room's player one never hears (its lines, so not as one to write to) */
+function unheardCodes(member, unheard) {
+    return member.keyHash && unheard.includes(member.keyHash);
 }
 
 /** the next line's number */
@@ -403,6 +486,26 @@ async function nextSeq() {
         { upsert: true, returnDocument: 'after' });
     const counter = result && Object.prototype.hasOwnProperty.call(result, 'value') ? result.value : result;
     return counter.seq;
+}
+
+function hasHash(list, keyHash) {
+    return Array.isArray(list) && list.includes(keyHash);
+}
+
+/** the accounts whose lines an account never hears: those it muted or
+ * blocked, and those that blocked it */
+async function unheardOf(account) {
+    const blockedBy = await (await collection(ACCOUNTS)).find({ blocked: account.keyHash },
+        { projection: { keyHash: 1 } }).toArray();
+    return [...new Set([...(account.muted || []), ...(account.blocked || []), ...blockedBy.map((other) => other.keyHash)])];
+}
+
+/** of these senders, those reported by REPORTED_HIDE_COUNT accounts or more */
+async function reportedAmong(hashes) {
+    if (!hashes.length) return new Set();
+    const rows = await (await collection(ACCOUNTS)).find({ keyHash: { $in: hashes }, reports: { $gte: REPORTED_HIDE_COUNT } },
+        { projection: { keyHash: 1 } }).toArray();
+    return new Set(rows.map((row) => row.keyHash));
 }
 
 function publicMessage(message) {
@@ -416,6 +519,7 @@ function publicMessage(message) {
         ...(message.to ? { to: message.to, toName: message.toName } : {}),
         text: message.text,
         at: message.at,
+        ...(message.reported ? { reported: true } : {}),
     };
 }
 
@@ -451,6 +555,10 @@ async function sendChat(key, body) {
     if (channel === 'private') {
         const recipient = await (await collection(ACCOUNTS)).findOne({ code: toCode });
         if (!recipient) return error('not_found', 404);
+        // (one either blocked, or that takes no private lines, hears none)
+        if (hasHash(account.blocked, recipient.keyHash)) return error('blocked', 403);
+        if (hasHash(recipient.blocked, account.keyHash)) return error('unavailable', 403);
+        if (!settingsOf(recipient).privateChat) return error('private_off', 403);
         message.toHash = recipient.keyHash;
         message.to = recipient.code;
         message.toName = recipient.name || recipient.code;
@@ -463,8 +571,10 @@ async function sendChat(key, body) {
 /**
  * the lines an account hears after a line's number (after: 0 or none, the
  * last CHAT_BACKLOG said and where they end): global ones (unless global is
- * 0), the room's, its team's (with team), and its private ones; and the
- * room's players
+ * 0), the room's, its team's (with team), and its private ones (unless its
+ * privateChat is off); and the room's players. Never those of accounts it
+ * muted or blocked or that blocked it; those of accounts reported by
+ * REPORTED_HIDE_COUNT or more only with reported=1 (marked reported)
  */
 async function pollChat(key, query) {
     await ensureIndexes();
@@ -474,23 +584,26 @@ async function pollChat(key, query) {
     const room = parseRoom(query?.room);
     const team = parseInteger(query?.team, 0, 15);
     const after = parseInteger(query?.after ?? 0, 0, Number.MAX_SAFE_INTEGER) ?? 0;
-    const heard = [
-        { channel: 'private', toHash: account.keyHash },
-        { channel: 'private', fromHash: account.keyHash },
-    ];
+    const heard = [];
+    if (settingsOf(account).privateChat) {
+        heard.push({ channel: 'private', toHash: account.keyHash }, { channel: 'private', fromHash: account.keyHash });
+    }
     if (query?.global !== '0') heard.push({ channel: 'global' });
     if (room) {
         heard.push({ channel: 'match', room });
         if (team !== null) heard.push({ channel: 'team', room, team });
-        roomNote(room, account.code, account.name || account.code, team);
+        roomNote(room, account.code, account.name || account.code, team, Date.now(), account.keyHash);
     }
     const messages = await collection(CHAT_MESSAGES);
+    const unheard = await unheardOf(account);
+    const filter = { $or: heard.length ? heard : [{ channel: 'none' }] };
+    if (unheard.length) filter.fromHash = { $nin: unheard };
     let rows;
     if (after > 0) {
-        rows = await messages.find({ seq: { $gt: after }, $or: heard }).sort({ seq: 1 }).limit(CHAT_POLL_MAX)
+        rows = await messages.find({ seq: { $gt: after }, ...filter }).sort({ seq: 1 }).limit(CHAT_POLL_MAX)
             .toArray();
     } else {
-        rows = (await messages.find({ $or: heard }).sort({ seq: -1 }).limit(CHAT_BACKLOG).toArray()).reverse();
+        rows = (await messages.find(filter).sort({ seq: -1 }).limit(CHAT_BACKLOG).toArray()).reverse();
     }
     let cursor = after;
     if (rows.length) {
@@ -499,11 +612,331 @@ async function pollChat(key, query) {
         const last = await messages.find({}).sort({ seq: -1 }).limit(1).toArray();
         cursor = last.length ? last[0].seq : 0;
     }
+    // (the cursor past them all, the lines of reported players hidden or marked)
+    const reported = await reportedAmong([...new Set(rows.map((row) => row.fromHash))]
+        .filter((hash) => hash !== account.keyHash));
+    const showReported = query?.reported === '1';
+    rows = rows.filter((row) => showReported || !reported.has(row.fromHash))
+        .map((row) => (reported.has(row.fromHash) ? { ...row, reported: true } : row));
     return {
         me: account.code,
         cursor,
         messages: rows.map(publicMessage),
-        members: room ? roomMembers(room) : [],
+        members: room ? roomMembers(room).filter((member) => !unheardCodes(member, unheard))
+            .map(({ keyHash, ...member }) => member) : [],
+    };
+}
+
+// ---------- presence
+
+/** what the game says it is doing: where (PRESENCE_STATES), the map, the
+ * gametype, the game's name and players, and the invite of the game it hosts
+ * (its friends may join it: kept only while join is on) */
+function parsePresence(body) {
+    const state = PRESENCE_STATES.has(body?.state) ? body.state : 'menus';
+    const invite = typeof body?.invite === 'string' ? body.invite.trim() : '';
+    return {
+        state,
+        map: parseLabel(body?.map, 64),
+        gametype: parseLabel(body?.gametype, 48),
+        game: parseLabel(body?.game, 48),
+        players: parseInteger(body?.players ?? 0, 0, 128) ?? 0,
+        maximum: parseInteger(body?.maximum ?? 0, 0, 128) ?? 0,
+        host: body?.host === true,
+        invite: /^[\x21-\x7e]{8,160}$/.test(invite) && invite.length <= INVITE_MAX_LEN ? invite : '',
+    };
+}
+
+function online(account, now = Date.now()) {
+    return Boolean(account?.lastSeenAt) && now - new Date(account.lastSeenAt).getTime() < ONLINE_MS;
+}
+
+/**
+ * another account as a viewer sees it: online (its friend list on: else
+ * never), and what it is doing (its activity on), its invite to a friend (its
+ * join on, a game it hosts)
+ */
+function presenceView(other, { friend = false, now = Date.now() } = {}) {
+    const settings = settingsOf(other);
+    const view = { online: settings.friends && online(other, now) };
+    if (view.online && settings.activity && other.presence) {
+        const { state, map, gametype, game, players, maximum, host, invite } = other.presence;
+        Object.assign(view, { state, map, gametype, game, players, maximum, host });
+        if (friend && settings.join && invite) view.invite = invite;
+    }
+    if (!view.online && settings.activity && settings.friends && other.lastSeenAt) view.lastSeenAt = other.lastSeenAt;
+    return view;
+}
+
+/** (POST /presence, every 45 seconds or so) what the game is doing; the friends online and the requests waiting */
+async function setPresence(key, body) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const account = await accountOf(parsedKey, { name: parseName(body?.name) });
+    const presence = { ...parsePresence(body), at: new Date() };
+    if (!settingsOf(account).join) presence.invite = '';
+    await (await collection(ACCOUNTS)).updateOne({ keyHash: account.keyHash }, { $set: { presence } });
+    const { friends, incoming } = await friendshipsOf(account);
+    const others = await accountsByHash(friends.map((row) => otherHash(row, account.keyHash)));
+    return {
+        friendsOnline: others.filter((other) => presenceView(other).online).length,
+        requests: incoming.length,
+    };
+}
+
+// ---------- friends
+
+function pairKey(one, other) {
+    return one < other ? `${one}:${other}` : `${other}:${one}`;
+}
+
+function otherHash(friendship, keyHash) {
+    return friendship.a === keyHash ? friendship.b : friendship.a;
+}
+
+async function accountsByHash(hashes) {
+    if (!hashes.length) return [];
+    return (await collection(ACCOUNTS)).find({ keyHash: { $in: hashes } }).toArray();
+}
+
+/** an account's friendships: its friends', and the requests to it and from it */
+async function friendshipsOf(account) {
+    const rows = await (await collection(FRIENDSHIPS)).find({ $or: [{ a: account.keyHash }, { b: account.keyHash }] })
+        .toArray();
+    return {
+        friends: rows.filter((row) => row.state === 'friends'),
+        incoming: rows.filter((row) => row.state === 'pending' && row.requester !== account.keyHash),
+        outgoing: rows.filter((row) => row.state === 'pending' && row.requester === account.keyHash),
+    };
+}
+
+async function friendshipOf(account, other) {
+    return (await collection(FRIENDSHIPS)).findOne({ pair: pairKey(account.keyHash, other.keyHash) });
+}
+
+/** what one account is to another: friend, incoming (asked to be its), outgoing (it asked), none */
+function relationOf(friendship, keyHash) {
+    if (!friendship) return 'none';
+    if (friendship.state === 'friends') return 'friends';
+    return friendship.requester === keyHash ? 'outgoing' : 'incoming';
+}
+
+function playerName(account) {
+    return account.name || account.code;
+}
+
+/** the account's friends (online first, then by name) with what they do, and the requests to and from it */
+async function getFriends(key) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const account = await accountOf(parsedKey);
+    const { friends, incoming, outgoing } = await friendshipsOf(account);
+    const others = new Map((await accountsByHash([...friends, ...incoming, ...outgoing]
+        .map((row) => otherHash(row, account.keyHash)))).map((other) => [other.keyHash, other]));
+    const now = Date.now();
+    const list = (rows, shape) => rows.map((row) => [row, others.get(otherHash(row, account.keyHash))])
+        .filter(([, other]) => other).map(([row, other]) => shape(row, other));
+    const friendList = list(friends, (row, other) => ({
+        code: other.code, name: playerName(other), since: row.since || row.at,
+        ...presenceView(other, { friend: true, now }),
+    }));
+    friendList.sort((one, other) => (other.online - one.online) || one.name.localeCompare(other.name));
+    return {
+        enabled: settingsOf(account).friends,
+        friends: friendList,
+        incoming: list(incoming, (row, other) => ({ code: other.code, name: playerName(other), at: row.at })),
+        outgoing: list(outgoing, (row, other) => ({ code: other.code, name: playerName(other), at: row.at })),
+    };
+}
+
+/** the account and another by its code (body.code, or a code given): errors for none, itself */
+async function accountAndOther(key, code) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return { failed: error('unauthorized', 401) };
+    const otherCode = normalizeCode(code);
+    if (!otherCode) return { failed: validationError(['code is not valid']) };
+    const account = await accountOf(parsedKey);
+    const other = await (await collection(ACCOUNTS)).findOne({ code: otherCode });
+    if (!other) return { failed: error('not_found', 404) };
+    if (other.keyHash === account.keyHash) return { account, other, self: true };
+    return { account, other };
+}
+
+/** (POST /friends) a request to be another's friend (accepted at once when it asked first) */
+async function requestFriend(key, body) {
+    const { failed, account, other, self } = await accountAndOther(key, body?.code);
+    if (failed) return failed;
+    if (self) return validationError(['that is your own code']);
+    if (hasHash(account.blocked, other.keyHash)) return error('blocked', 403);
+    if (hasHash(other.blocked, account.keyHash)) return error('unavailable', 403);
+    if (!settingsOf(account).friends) return error('friends_off', 403);
+    const friendships = await collection(FRIENDSHIPS);
+    const existing = await friendshipOf(account, other);
+    const player = { code: other.code, name: playerName(other) };
+    if (existing?.state === 'friends') return { state: 'friends', player };
+    if (existing && existing.requester !== account.keyHash) {
+        await friendships.updateOne({ _id: existing._id }, { $set: { state: 'friends', since: new Date() } });
+        return { state: 'friends', player };
+    }
+    if (existing) return { state: 'outgoing', player };
+    const otherSettings = settingsOf(other);
+    if (!otherSettings.friends || !otherSettings.requests) return error('not_accepting', 403);
+    const { friends, outgoing } = await friendshipsOf(account);
+    if (friends.length + outgoing.length >= FRIENDS_MAX) return error('too_many', 422);
+    try {
+        await friendships.insertOne({
+            pair: pairKey(account.keyHash, other.keyHash), a: account.keyHash, b: other.keyHash,
+            requester: account.keyHash, state: 'pending', at: new Date(),
+        });
+    } catch (err) {
+        if (err?.code !== 11000) throw err;
+    }
+    return { state: 'outgoing', player };
+}
+
+/** (POST /friends/accept) another's request accepted */
+async function acceptFriend(key, body) {
+    const { failed, account, other, self } = await accountAndOther(key, body?.code);
+    if (failed) return failed;
+    if (self) return validationError(['that is your own code']);
+    const existing = await friendshipOf(account, other);
+    if (!existing || existing.requester === account.keyHash) return error('not_found', 404);
+    if (existing.state !== 'friends') {
+        await (await collection(FRIENDSHIPS)).updateOne({ _id: existing._id },
+            { $set: { state: 'friends', since: new Date() } });
+    }
+    return { state: 'friends', player: { code: other.code, name: playerName(other) } };
+}
+
+/** (POST /friends/remove) a friend removed, a request declined or taken back */
+async function removeFriend(key, body) {
+    const { failed, account, other, self } = await accountAndOther(key, body?.code);
+    if (failed) return failed;
+    if (self) return validationError(['that is your own code']);
+    await (await collection(FRIENDSHIPS)).deleteOne({ pair: pairKey(account.keyHash, other.keyHash) });
+    return { state: 'none', player: { code: other.code, name: playerName(other) } };
+}
+
+// ---------- players and activity
+
+/** a match as others see it */
+function publicMatch(row) {
+    const { _id, account, platform, build, matchId, ...match } = row;
+    return match;
+}
+
+/** (GET /players/:code) a player: its totals and medals, what it is doing,
+ * its latest matches (its activity on, or its own), and what it is to the
+ * one asking (friend, muted, blocked) */
+async function getPlayer(key, code, query) {
+    const { failed, account, other, self } = await accountAndOther(key, code);
+    if (failed) return failed;
+    const friendship = self ? null : await friendshipOf(account, other);
+    const relation = self ? 'self' : relationOf(friendship, account.keyHash);
+    const settings = settingsOf(other);
+    const limit = parseLimit(query?.matches, 10, PLAYER_MATCHES_MAX);
+    const shown = self || (settings.activity && !hasHash(other.blocked, account.keyHash));
+    const matches = shown ? await (await collection(ACCOUNT_MATCHES)).find({ account: other.keyHash })
+        .sort({ playedAt: -1 }).limit(limit).toArray() : [];
+    return {
+        player: {
+            ...publicAccount(other),
+            ...(self ? { online: true } : presenceView(other, { friend: relation === 'friends' })),
+            relation,
+            muted: hasHash(account.muted, other.keyHash),
+            blocked: hasHash(account.blocked, other.keyHash),
+            requests: settings.friends && settings.requests,
+        },
+        matches: matches.map(publicMatch),
+    };
+}
+
+/** (GET /activity) the friends' latest matches and levels (those whose activity is on) */
+async function getActivity(key, query) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const account = await accountOf(parsedKey);
+    const { friends } = await friendshipsOf(account);
+    const others = (await accountsByHash(friends.map((row) => otherHash(row, account.keyHash))))
+        .filter((other) => settingsOf(other).activity && settingsOf(other).friends);
+    if (!others.length) return { activity: [] };
+    const byHash = new Map(others.map((other) => [other.keyHash, other]));
+    const rows = await (await collection(ACCOUNT_MATCHES)).find({ account: { $in: [...byHash.keys()] } })
+        .sort({ playedAt: -1 }).limit(parseLimit(query?.limit, 30, ACTIVITY_MAX)).toArray();
+    return {
+        activity: rows.map((row) => ({
+            code: byHash.get(row.account).code, player: playerName(byHash.get(row.account)), ...publicMatch(row),
+        })),
+    };
+}
+
+// ---------- moderation
+
+/** (GET /moderation) the accounts muted and blocked */
+async function getModeration(key) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const account = await accountOf(parsedKey);
+    const shape = (others) => others.map((other) => ({ code: other.code, name: playerName(other) }))
+        .sort((one, other) => one.name.localeCompare(other.name));
+    return {
+        muted: shape(await accountsByHash(account.muted || [])),
+        blocked: shape(await accountsByHash(account.blocked || [])),
+    };
+}
+
+/**
+ * (POST /moderation) another account muted (its lines never heard) or not,
+ * blocked (neither hears the other, no private lines or friend requests
+ * either way, their friendship ended) or not, or reported (once: muted too,
+ * and REPORTED_HIDE_COUNT accounts' reports hide its lines from those who
+ * did not ask for them)
+ */
+async function moderate(key, body) {
+    const action = body?.action;
+    if (!MODERATION_ACTIONS.has(action)) return validationError(['action must be mute, unmute, block, unblock or report']);
+    const { failed, account, other, self } = await accountAndOther(key, body?.code);
+    if (failed) return failed;
+    if (self) return validationError(['that is your own code']);
+    const accounts = await collection(ACCOUNTS);
+    const listed = (field) => (account[field] || []).length >= MODERATION_MAX && !hasHash(account[field], other.keyHash);
+    let duplicate = false;
+    if (action === 'mute' || action === 'report') {
+        if (listed('muted')) return error('too_many', 422);
+        await accounts.updateOne({ keyHash: account.keyHash }, { $addToSet: { muted: other.keyHash } });
+    }
+    if (action === 'unmute') await accounts.updateOne({ keyHash: account.keyHash }, { $pull: { muted: other.keyHash } });
+    if (action === 'block') {
+        if (listed('blocked')) return error('too_many', 422);
+        await accounts.updateOne({ keyHash: account.keyHash }, { $addToSet: { blocked: other.keyHash } });
+        await (await collection(FRIENDSHIPS)).deleteOne({ pair: pairKey(account.keyHash, other.keyHash) });
+    }
+    if (action === 'unblock') {
+        await accounts.updateOne({ keyHash: account.keyHash }, { $pull: { blocked: other.keyHash } });
+    }
+    if (action === 'report') {
+        try {
+            await (await collection(ACCOUNT_REPORTS)).insertOne({
+                from: account.keyHash, target: other.keyHash, reason: parseLabel(body?.reason, REPORT_REASON_MAX),
+                at: new Date(),
+            });
+            await accounts.updateOne({ keyHash: other.keyHash }, { $inc: { reports: 1 } });
+        } catch (err) {
+            if (err?.code !== 11000) throw err;
+            duplicate = true;
+        }
+    }
+    const updated = await accounts.findOne({ keyHash: account.keyHash });
+    return {
+        player: { code: other.code, name: playerName(other) },
+        muted: hasHash(updated.muted, other.keyHash),
+        blocked: hasHash(updated.blocked, other.keyHash),
+        ...(action === 'report' ? { reported: true, duplicate } : {}),
     };
 }
 
@@ -511,7 +944,8 @@ module.exports = {
     internals: {
         ACCOUNTS, ACCOUNT_MATCHES, CHAT_MESSAGES, CHAT_BURST, CHAT_REFILL_MS, ROOM_MEMBER_MS,
         accountKey, hashKey, normalizeCode, newCode, parseMatch, matchIncrements, publicTotals, parseChatText,
-        parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms,
+        parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms, REPORTED_HIDE_COUNT, ONLINE_MS,
+        parseSettings, settingsOf, unflatten, parsePresence, presenceView, pairKey, relationOf,
     },
     hello,
     getAccount,
@@ -519,4 +953,13 @@ module.exports = {
     getMatches,
     sendChat,
     pollChat,
+    setPresence,
+    getFriends,
+    requestFriend,
+    acceptFriend,
+    removeFriend,
+    getPlayer,
+    getActivity,
+    getModeration,
+    moderate,
 };
