@@ -55,18 +55,29 @@ async function exercise(social) {
     }
     assert.ok(one, 'mongod answered');
     const two = await social.hello(key('b'), { name: 'Two', settings: { requests: true } });
-    const three = await social.hello(key('c'), { name: 'Three', settings: { requests: false } });
+    const three = await social.hello(key('c'), { name: 'Three', settings: { requests: false, privateAnyone: false } });
     assert.strictEqual(three.account.settings.requests, false);
     const codeOne = one.account.code;
     const codeTwo = two.account.code;
     const codeThree = three.account.code;
+    // (others know an account by its public id: its code is its own to give)
+    const idOf = async (viewer, code) => (await social.getPlayer(key(viewer), code, {})).player.code;
+    const idOne = await idOf('b', codeOne);
+    const idTwo = await idOf('a', codeTwo);
+    const idThree = await idOf('a', codeThree);
+    assert.match(idTwo, /^p[0-9a-z]{11}$/);
+    assert.strictEqual(await idOf('b', codeTwo), codeTwo);
+    assert.strictEqual(await idOf('b', idTwo), codeTwo);
 
     // (asking: pending, then accepted by the other asking back)
     assert.strictEqual((await social.requestFriend(key('a'), { code: codeTwo })).state, 'outgoing');
     let friends = await social.getFriends(key('b'));
-    assert.deepStrictEqual(friends.incoming.map((row) => row.code), [codeOne]);
+    assert.deepStrictEqual(friends.incoming.map((row) => row.code), [idOne]);
     assert.strictEqual((await social.requestFriend(key('b'), { code: codeOne })).state, 'friends');
-    assert.strictEqual((await social.requestFriend(key('a'), { code: codeThree })).error.type, 'not_accepting');
+    // (requests off: only by the code, not from the chat or a page)
+    assert.strictEqual((await social.requestFriend(key('a'), { code: idThree })).error.type, 'not_accepting');
+    assert.strictEqual((await social.requestFriend(key('a'), { code: codeThree })).state, 'outgoing');
+    await social.removeFriend(key('a'), { code: idThree });
     assert.strictEqual((await social.requestFriend(key('a'), { code: codeOne })).status, 422);
 
     // (presence: a friend sees the game and its invite)
@@ -74,7 +85,7 @@ async function exercise(social) {
     const answer = await social.setPresence(key('b'), { state: 'multiplayer', map: 'bloodgulch', host: true, invite });
     assert.strictEqual(answer.friendsOnline, 1);
     friends = await social.getFriends(key('a'));
-    assert.strictEqual(friends.friends[0].code, codeTwo);
+    assert.strictEqual(friends.friends[0].code, idTwo);
     assert.strictEqual(friends.friends[0].online, true);
     assert.strictEqual(friends.friends[0].invite, invite);
     await social.hello(key('b'), { settings: { join: false } });
@@ -87,7 +98,7 @@ async function exercise(social) {
     await social.submitMatch(key('b'), { matchId: 'match00000002', kind: 'multiplayer', completed: false, endReason: 'quit', kills: 2 });
     const activity = await social.getActivity(key('a'), {});
     assert.strictEqual(activity.activity.length, 1);
-    assert.strictEqual(activity.activity[0].code, codeTwo);
+    assert.strictEqual(activity.activity[0].code, idTwo);
     assert.strictEqual(activity.activity[0].matchId, undefined);
     const player = await social.getPlayer(key('a'), codeTwo, {});
     assert.strictEqual(player.player.relation, 'friends');
@@ -113,22 +124,35 @@ async function exercise(social) {
     // (chat: muted, then blocked, never heard; reported by enough, hidden unless asked)
     await social.sendChat(key('c'), { channel: 'global', text: 'hello from three' });
     let heard = await social.pollChat(key('a'), after);
-    assert.ok(heard.messages.some((message) => message.from === codeThree));
+    assert.ok(heard.messages.some((message) => message.from === idThree));
     await social.moderate(key('a'), { code: codeThree, action: 'mute' });
     heard = await social.pollChat(key('a'), after);
-    assert.ok(!heard.messages.some((message) => message.from === codeThree));
+    assert.ok(!heard.messages.some((message) => message.from === idThree));
     let moderation = await social.getModeration(key('a'));
-    assert.deepStrictEqual(moderation.muted.map((row) => row.code), [codeThree]);
+    assert.deepStrictEqual(moderation.muted.map((row) => row.code), [idThree]);
     await social.moderate(key('a'), { code: codeThree, action: 'unmute' });
-    assert.ok((await social.pollChat(key('a'), after)).messages.some((message) => message.from === codeThree));
+    assert.ok((await social.pollChat(key('a'), after)).messages.some((message) => message.from === idThree));
+    // (one's own lines: by its own code; a private line to one that takes
+    // them from friends alone, refused; to a friend, by its id, taken)
+    await social.sendChat(key('a'), { channel: 'global', text: 'mine' });
+    assert.ok((await social.pollChat(key('a'), after)).messages.some((message) => message.text === 'mine' &&
+        message.from === codeOne));
+    assert.strictEqual((await social.sendChat(key('a'), { channel: 'private', to: idThree, text: 'hi' })).error.type,
+        'friends_only');
+    // (and one that takes them from friends alone writes to them alone)
+    assert.strictEqual((await social.sendChat(key('c'), { channel: 'private', to: (await idOf('c', codeOne)), text: 'hi' }))
+        .error.type, 'own_friends_only');
+    const sent = await social.sendChat(key('a'), { channel: 'private', to: idTwo, text: 'to two' });
+    assert.strictEqual(sent.message.to, idTwo);
+    assert.strictEqual(sent.message.from, codeOne);
 
     await social.moderate(key('b'), { code: codeOne, action: 'block' });
     assert.strictEqual((await social.getFriends(key('a'))).friends.length, 0);
-    assert.strictEqual((await social.sendChat(key('a'), { channel: 'private', to: codeTwo, text: 'hi' })).error.type,
+    assert.strictEqual((await social.sendChat(key('a'), { channel: 'private', to: idTwo, text: 'hi' })).error.type,
         'unavailable');
     assert.strictEqual((await social.requestFriend(key('a'), { code: codeTwo })).error.type, 'unavailable');
     await social.sendChat(key('b'), { channel: 'global', text: 'from two' });
-    assert.ok(!(await social.pollChat(key('a'), after)).messages.some((message) => message.from === codeTwo));
+    assert.ok(!(await social.pollChat(key('a'), after)).messages.some((message) => message.from === idTwo));
     await social.moderate(key('b'), { code: codeOne, action: 'unblock' });
 
     for (const letter of ['d', 'e', 'f'].slice(0, social.internals.REPORTED_HIDE_COUNT)) {
@@ -139,9 +163,9 @@ async function exercise(social) {
     }
     assert.strictEqual((await social.moderate(key('d'), { code: codeThree, action: 'report' })).duplicate, true);
     heard = await social.pollChat(key('a'), after);
-    assert.ok(!heard.messages.some((message) => message.from === codeThree));
+    assert.ok(!heard.messages.some((message) => message.from === idThree));
     heard = await social.pollChat(key('a'), { ...after, reported: '1' });
-    const reported = heard.messages.find((message) => message.from === codeThree);
+    const reported = heard.messages.find((message) => message.from === idThree);
     assert.ok(reported && reported.reported);
 
     // (private lines off: none reach it)

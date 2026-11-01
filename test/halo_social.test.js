@@ -121,9 +121,20 @@ test('settings are taken as sent, each on until set', () => {
     assert.strictEqual(social.parseSettings({}), null);
     assert.strictEqual(social.parseSettings([]), null);
     assert.deepStrictEqual(social.settingsOf({ settings: { requests: false } }),
-        { friends: true, requests: false, activity: true, join: true, privateChat: true });
+        { friends: true, requests: false, activity: true, join: true, privateChat: true, privateAnyone: true });
     assert.deepStrictEqual(social.unflatten({ 'settings.friends': false, lastSeenAt: 1 }),
         { settings: { friends: false }, lastSeenAt: 1 });
+});
+
+test('another account is known by its public id, its own by its code', () => {
+    const id = social.newPublicId();
+    assert.match(id, /^p[0-9a-z]{11}$/);
+    const account = { keyHash: 'h1', code: 'ABCD-EFGH', publicId: id };
+    assert.strictEqual(social.idFor(account, 'h1'), 'ABCD-EFGH');
+    assert.strictEqual(social.idFor(account, 'h2'), id);
+    assert.deepStrictEqual(social.accountQuery(id), { query: { publicId: id }, byCode: false });
+    assert.deepStrictEqual(social.accountQuery('abcdefgh'), { query: { code: 'ABCD-EFGH' }, byCode: true });
+    assert.strictEqual(social.accountQuery('nope'), null);
 });
 
 test('presence shows what the other lets it', () => {
