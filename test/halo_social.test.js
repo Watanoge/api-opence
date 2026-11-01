@@ -85,3 +85,42 @@ test('a room keeps the players heard from lately', () => {
     assert.deepStrictEqual(social.roomMembers('p2p:room', 20000 + social.ROOM_MEMBER_MS + 1), []);
     assert.ok(!social.rooms.has('p2p:room'));
 });
+
+test('settings are taken as sent, each on until set', () => {
+    assert.deepStrictEqual(social.parseSettings({ friends: false, join: true, other: false, activity: 'no' }),
+        { friends: false, join: true });
+    assert.strictEqual(social.parseSettings({}), null);
+    assert.strictEqual(social.parseSettings([]), null);
+    assert.deepStrictEqual(social.settingsOf({ settings: { requests: false } }),
+        { friends: true, requests: false, activity: true, join: true, privateChat: true });
+    assert.deepStrictEqual(social.unflatten({ 'settings.friends': false, lastSeenAt: 1 }),
+        { settings: { friends: false }, lastSeenAt: 1 });
+});
+
+test('presence shows what the other lets it', () => {
+    const now = Date.now();
+    const presence = { state: 'multiplayer', map: 'bloodgulch', invite: 'halo://join/' + 'a'.repeat(64) };
+    const other = { lastSeenAt: new Date(now - 1000), presence };
+    assert.strictEqual(social.presenceView(other, { now }).online, true);
+    assert.strictEqual(social.presenceView(other, { now }).map, 'bloodgulch');
+    assert.strictEqual(social.presenceView(other, { now }).invite, undefined);
+    assert.strictEqual(social.presenceView(other, { friend: true, now }).invite, presence.invite);
+    const away = { ...other, lastSeenAt: new Date(now - social.ONLINE_MS - 1) };
+    assert.strictEqual(social.presenceView(away, { friend: true, now }).online, false);
+    const hidden = { ...other, settings: { activity: false } };
+    assert.deepStrictEqual(social.presenceView(hidden, { friend: true, now }), { online: true });
+    const noJoin = { ...other, settings: { join: false } };
+    assert.strictEqual(social.presenceView(noJoin, { friend: true, now }).invite, undefined);
+    const noFriends = { ...other, settings: { friends: false } };
+    assert.deepStrictEqual(social.presenceView(noFriends, { friend: true, now }), { online: false });
+    assert.strictEqual(social.parsePresence({ state: 'bogus', invite: 'x y' }).state, 'menus');
+    assert.strictEqual(social.parsePresence({ invite: 'x y' }).invite, '');
+});
+
+test('a friendship is one pair, whoever asked', () => {
+    assert.strictEqual(social.pairKey('b', 'a'), social.pairKey('a', 'b'));
+    assert.strictEqual(social.relationOf(null, 'a'), 'none');
+    assert.strictEqual(social.relationOf({ state: 'friends' }, 'a'), 'friends');
+    assert.strictEqual(social.relationOf({ state: 'pending', requester: 'a' }, 'a'), 'outgoing');
+    assert.strictEqual(social.relationOf({ state: 'pending', requester: 'b' }, 'a'), 'incoming');
+});
