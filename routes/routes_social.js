@@ -18,6 +18,10 @@
  *   GET  /activity                ?limit= the friends' latest matches and levels
  *   GET  /moderation              the accounts muted and blocked
  *   POST /moderation              {code, action: mute|unmute|block|unblock|report, reason}
+ *
+ * Another account is named by its public id (as every answer gives it) or by
+ * its friend code (as a player types it: a friend request by it is taken
+ * even from an account that takes no others); a chat line's `to` alike.
  */
 const express = require('express');
 const {
