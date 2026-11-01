@@ -144,11 +144,13 @@ profile name the game sends with each score.
 | PUT | `/daily/:day` | a challenge set by hand (`x-admin-code: HALO_ADMIN_CODE`), for a day with no scores yet |
 | POST | `/account` | the game started: the account (made the first time), its totals and medals; `{name, platform, build}` |
 | GET | `/account` | the same, without noting the name |
+| POST | `/account/code` | the friend code drawn anew (the old one no longer finds the account; its public id, friends and requests stay); `429 too_soon` within a minute of the last |
 | POST | `/account/matches` | a match or level played: `{matchId, kind: multiplayer\|campaign, result, score, kills, deaths, assists, suicides, betrayals, seconds, players, place, map, gametype, teams, medals: {key: count}, name}` |
 | GET | `/account/matches` | `?limit=` (up to 50) the latest |
 | POST | `/chat/messages` | a line: `{channel: global\|match\|team\|private, text, room, team, to, name}` |
-| GET | `/chat/messages` | `?after=&room=&team=&global=0&reported=1&name=` the lines heard since `after` (none: no lines, only the cursor to go on from), and the room's players |
-| POST | `/presence` | what the game is doing: `{state: menus\|campaign\|multiplayer\|theater, map, gametype, game, players, maximum, host, invite, name}`; the friends online and the requests waiting |
+| GET | `/chat/messages` | `?after=&room=&team=&global=0&reported=1&name=` the lines heard since `after` (none: no lines, only the cursor to go on from), the room's players, and `friends`: a key of the account's friendships that changes when one is asked, accepted, declined or removed |
+| POST | `/presence` | what the game is doing: `{state: menus\|lobby\|campaign\|multiplayer\|theater, map, gametype, game, players, maximum, host, invite, name}`; the friends online, the requests waiting, and the friendships' key (as the chat's) |
+| POST | `/presence/offline` | the game closed (a web tab's `navigator.sendBeacon`: the key as `X-Halo-Key` or as the text body): offline at once, until it is heard from again |
 | GET | `/friends` | the friends (online first) and what they do, the requests to and from the account |
 | POST | `/friends` | `{code}` asked to be its friend (accepted at once when it asked first) |
 | POST | `/friends/accept` | `{code}` its request accepted |

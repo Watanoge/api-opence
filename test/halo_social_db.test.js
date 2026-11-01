@@ -58,7 +58,7 @@ async function exercise(social) {
     const three = await social.hello(key('c'), { name: 'Three', settings: { requests: false, privateAnyone: false } });
     assert.strictEqual(three.account.settings.requests, false);
     const codeOne = one.account.code;
-    const codeTwo = two.account.code;
+    let codeTwo = two.account.code;
     const codeThree = three.account.code;
     // (others know an account by its public id: its code is its own to give)
     const idOf = async (viewer, code) => (await social.getPlayer(key(viewer), code, {})).player.code;
@@ -69,21 +69,40 @@ async function exercise(social) {
     assert.strictEqual(await idOf('b', codeTwo), codeTwo);
     assert.strictEqual(await idOf('b', idTwo), codeTwo);
 
-    // (asking: pending, then accepted by the other asking back)
+    // (asking: pending, then accepted by the other asking back; the
+    // friendships' key in the chat's poll changes each time)
+    const keyOf = async (viewer) => (await social.pollChat(key(viewer), {})).friends;
+    const keyBefore = await keyOf('a');
+    assert.match(keyBefore, /^[0-9a-f]{16}$/);
     assert.strictEqual((await social.requestFriend(key('a'), { code: codeTwo })).state, 'outgoing');
+    const keyAsked = await keyOf('a');
+    assert.notStrictEqual(keyAsked, keyBefore);
     let friends = await social.getFriends(key('b'));
     assert.deepStrictEqual(friends.incoming.map((row) => row.code), [idOne]);
     assert.strictEqual((await social.requestFriend(key('b'), { code: codeOne })).state, 'friends');
+    assert.notStrictEqual(await keyOf('a'), keyAsked);
+    assert.strictEqual((await social.setPresence(key('a'), {})).friends, await keyOf('a'));
     // (requests off: only by the code, not from the chat or a page)
     assert.strictEqual((await social.requestFriend(key('a'), { code: idThree })).error.type, 'not_accepting');
     assert.strictEqual((await social.requestFriend(key('a'), { code: codeThree })).state, 'outgoing');
     await social.removeFriend(key('a'), { code: idThree });
     assert.strictEqual((await social.requestFriend(key('a'), { code: codeOne })).status, 422);
 
+    // (a new friend code: the old one finds no one, the friendship stays)
+    const changed = await social.changeCode(key('b'));
+    assert.notStrictEqual(changed.account.code, codeTwo);
+    assert.strictEqual((await social.requestFriend(key('c'), { code: codeTwo })).error.type, 'no_player');
+    assert.strictEqual((await social.getFriends(key('a'))).friends[0].code, idTwo);
+    assert.strictEqual((await social.changeCode(key('b'))).status, 429);
+    codeTwo = changed.account.code;
+
     // (presence: a friend sees the game and its invite)
+    // (and the friendships' key changes with what a friend is doing)
     const invite = `halo://join/${'f'.repeat(64)}`;
+    const keyMenus = await keyOf('a');
     const answer = await social.setPresence(key('b'), { state: 'multiplayer', map: 'bloodgulch', host: true, invite });
     assert.strictEqual(answer.friendsOnline, 1);
+    assert.notStrictEqual(await keyOf('a'), keyMenus);
     friends = await social.getFriends(key('a'));
     assert.strictEqual(friends.friends[0].code, idTwo);
     assert.strictEqual(friends.friends[0].online, true);
@@ -91,6 +110,31 @@ async function exercise(social) {
     await social.hello(key('b'), { settings: { join: false } });
     await social.setPresence(key('b'), { state: 'multiplayer', invite });
     assert.strictEqual((await social.getFriends(key('a'))).friends[0].invite, undefined);
+    assert.strictEqual((await social.getFriends(key('a'))).friends[0].private, true);
+    // (a public game's, join off or not: its invite, or with a password its listing's key)
+    await social.setPresence(key('b'), { state: 'multiplayer', invite, public: true });
+    assert.strictEqual((await social.getFriends(key('a'))).friends[0].invite, invite);
+    await social.setPresence(key('b'), { state: 'multiplayer', hostKey: 'A'.repeat(32), locked: true, public: true });
+    friends = await social.getFriends(key('a'));
+    assert.strictEqual(friends.friends[0].hostKey, 'a'.repeat(32));
+    assert.strictEqual(friends.friends[0].locked, true);
+    assert.strictEqual(friends.friends[0].invite, undefined);
+    await social.setPresence(key('b'), { state: 'multiplayer', private: true });
+    friends = await social.getFriends(key('a'));
+    assert.strictEqual(friends.friends[0].private, true);
+    assert.strictEqual(friends.friends[0].hostKey, undefined);
+    // (its own card: what it is doing)
+    assert.strictEqual((await social.getPlayer(key('b'), codeTwo, {})).player.state, 'multiplayer');
+    // (the game closed: offline at once; online again once heard from)
+    assert.strictEqual((await social.setOffline(` ${key('b')}\n`)).status, undefined);
+    assert.strictEqual((await social.getFriends(key('a'))).friends[0].online, false);
+    assert.strictEqual((await social.setOffline('')).status, 401);
+    await (await require('../database/db').collection(social.internals.ACCOUNTS)).updateOne({ keyHash: social.internals.hashKey(key('b')) },
+        { $set: { offlineAt: new Date(Date.now() - social.internals.OFFLINE_GRACE_MS - 1000) } });
+    await social.setPresence(key('b'), { state: 'lobby' });
+    friends = await social.getFriends(key('a'));
+    assert.strictEqual(friends.friends[0].online, true);
+    assert.strictEqual(friends.friends[0].state, 'lobby');
 
     // (activity: a friend's match)
     await social.submitMatch(key('b'), { matchId: 'match00000001', kind: 'multiplayer', result: 'win', kills: 9, map: 'bloodgulch' });

@@ -155,6 +155,21 @@ test('presence shows what the other lets it', () => {
     assert.deepStrictEqual(social.presenceView(noFriends, { friend: true, now }), { online: false });
     assert.strictEqual(social.parsePresence({ state: 'bogus', invite: 'x y' }).state, 'menus');
     assert.strictEqual(social.parsePresence({ invite: 'x y' }).invite, '');
+    assert.strictEqual(social.parsePresence({ state: 'lobby' }).state, 'lobby');
+    // (said offline: until heard from again, past the requests on their way)
+    const closed = { ...other, offlineAt: new Date(now - 500) };
+    assert.strictEqual(social.presenceView(closed, { friend: true, now }).online, false);
+    assert.ok(social.presenceView(closed, { friend: true, now }).lastSeenAt);
+    const late = { ...other, offlineAt: new Date(now - 1000 - social.OFFLINE_GRACE_MS + 1) };
+    assert.strictEqual(social.presenceView(late, { friend: true, now }).online, false);
+    const back = { ...other, offlineAt: new Date(now - 1000 - social.OFFLINE_GRACE_MS - 1) };
+    assert.strictEqual(social.presenceView(back, { friend: true, now }).online, true);
+    // (a game that polled its chat: offline once its polls stop, sooner than ONLINE_MS)
+    const polled = { ...other, lastSeenAt: new Date(now - social.POLLING_ONLINE_MS - 1), chatPolledAt: new Date(now - social.POLLING_ONLINE_MS - 1) };
+    assert.strictEqual(social.presenceView(polled, { friend: true, now }).online, false);
+    assert.strictEqual(social.presenceView({ ...polled, chatPolledAt: undefined }, { friend: true, now }).online, true);
+    const stillPolling = { ...other, chatPolledAt: new Date(now - 3000) };
+    assert.strictEqual(social.presenceView(stillPolling, { friend: true, now }).online, true);
 });
 
 test('a friendship is one pair, whoever asked', () => {

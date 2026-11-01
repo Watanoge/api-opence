@@ -56,6 +56,8 @@ const ACCOUNT_REPORTS = 'account_reports';
 const NAME_MAX_LEN = 32;
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const CODE_LENGTH = 8;
+// (a friend code drawn anew at most this often)
+const CODE_CHANGE_MS = 60000;
 const MATCH_KINDS = new Set(['multiplayer', 'campaign']);
 const MATCH_RESULTS = new Set(['win', 'loss', 'tie']);
 const MATCH_END_REASONS = new Set(['quit', 'ended', 'disconnected']);
@@ -88,7 +90,15 @@ const PUBLIC_ID_PATTERN = /^p[0-9a-z]{11}$/;
 /** an account is online while it was heard from this lately (the game's
  * presence comes every 45 seconds, its chat's polls more often) */
 const ONLINE_MS = 120000;
-const PRESENCE_STATES = new Set(['menus', 'campaign', 'multiplayer', 'theater']);
+/** (POST /presence/offline: the game closed, a browser's tab) its requests
+ * still on their way when it closed are heard this long after it */
+const OFFLINE_GRACE_MS = 10000;
+/** an account whose last word was its chat's poll (every 6 seconds at most,
+ * 15 after a failure) is online while heard from this lately: a game gone
+ * without saying so (a tab closed before its beacon, a build without one, a
+ * crash) is offline sooner than ONLINE_MS */
+const POLLING_ONLINE_MS = 45000;
+const PRESENCE_STATES = new Set(['menus', 'lobby', 'campaign', 'multiplayer', 'theater']);
 const INVITE_MAX_LEN = 160;
 const FRIENDS_MAX = 200;
 const MODERATION_MAX = 500;
@@ -452,6 +462,32 @@ async function getAccount(key) {
     return { account: ownAccount(await accountOf(parsedKey)) };
 }
 
+/**
+ * (POST /account/code) the account's friend code drawn anew: the old one no
+ * longer finds it (others know it by its public id, which stays: its friends
+ * and requests stay too)
+ */
+async function changeCode(key, now = Date.now()) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const account = await accountOf(parsedKey);
+    if (account.codeChangedAt && now - new Date(account.codeChangedAt).getTime() < CODE_CHANGE_MS) {
+        return error('too_soon', 429);
+    }
+    const accounts = await collection(ACCOUNTS);
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const code = newCode();
+        try {
+            await accounts.updateOne({ keyHash: account.keyHash }, { $set: { code, codeChangedAt: new Date(now) } });
+            return { account: ownAccount({ ...account, code }) };
+        } catch (err) {
+            if (err?.code !== 11000) throw err;
+        }
+    }
+    throw new Error('could not draw an account code');
+}
+
 async function submitMatch(key, body) {
     await ensureIndexes();
     const parsedKey = accountKey(key);
@@ -661,7 +697,7 @@ async function pollChat(key, query) {
     await ensureIndexes();
     const parsedKey = accountKey(key);
     if (!parsedKey) return error('unauthorized', 401);
-    const account = await accountOf(parsedKey, { name: parseName(query?.name) });
+    const account = await accountOf(parsedKey, { name: parseName(query?.name), extra: { chatPolledAt: new Date() } });
     const room = parseRoom(query?.room);
     const team = parseInteger(query?.team, 0, 15);
     const after = parseInteger(query?.after ?? 0, 0, Number.MAX_SAFE_INTEGER) ?? 0;
@@ -703,6 +739,8 @@ async function pollChat(key, query) {
     return {
         me: account.code,
         cursor,
+        // (the friendships' key: the game asks for /friends again when it changes)
+        friends: await friendsKeyOf(account),
         messages: rows.map((row) => publicMessage(row, account.keyHash)),
         members: room ? roomMembers(room).filter((member) => !unheardCodes(member, unheard))
             .map(({ keyHash, publicId, ...member }) => ({
@@ -714,11 +752,15 @@ async function pollChat(key, query) {
 // ---------- presence
 
 /** what the game says it is doing: where (PRESENCE_STATES), the map, the
- * gametype, the game's name and players, and the invite of the game it hosts
- * (its friends may join it: kept only while join is on) */
+ * gametype, the game's name and players, and how its friends may join its
+ * game: its invite, or a password's public game's listing key (hostKey, its
+ * host's key hash: the friend's server browser finds it and asks for the
+ * password); else private, said. A public game's (listed in the server
+ * browser) whatever join says; a private one's invite only while join is on */
 function parsePresence(body) {
     const state = PRESENCE_STATES.has(body?.state) ? body.state : 'menus';
     const invite = typeof body?.invite === 'string' ? body.invite.trim() : '';
+    const hostKey = typeof body?.hostKey === 'string' ? body.hostKey.trim().toLowerCase() : '';
     return {
         state,
         map: parseLabel(body?.map, 64),
@@ -728,11 +770,20 @@ function parsePresence(body) {
         maximum: parseInteger(body?.maximum ?? 0, 0, 128) ?? 0,
         host: body?.host === true,
         invite: /^[\x21-\x7e]{8,160}$/.test(invite) && invite.length <= INVITE_MAX_LEN ? invite : '',
+        hostKey: /^[0-9a-f]{32}$/.test(hostKey) ? hostKey : '',
+        locked: body?.locked === true,
+        public: body?.public === true,
+        private: body?.private === true,
     };
 }
 
 function online(account, now = Date.now()) {
-    return Boolean(account?.lastSeenAt) && now - new Date(account.lastSeenAt).getTime() < ONLINE_MS;
+    if (!account?.lastSeenAt) return false;
+    const seen = new Date(account.lastSeenAt).getTime();
+    // (said offline: online again once heard from after it)
+    if (account.offlineAt && seen < new Date(account.offlineAt).getTime() + OFFLINE_GRACE_MS) return false;
+    const polling = account.chatPolledAt && seen - new Date(account.chatPolledAt).getTime() < POLLING_ONLINE_MS;
+    return now - seen < (polling ? POLLING_ONLINE_MS : ONLINE_MS);
 }
 
 /**
@@ -744,12 +795,21 @@ function presenceView(other, { friend = false, now = Date.now() } = {}) {
     const settings = settingsOf(other);
     const view = { online: settings.friends && online(other, now) };
     if (view.online && settings.activity && other.presence) {
-        const { state, map, gametype, game, players, maximum, host, invite } = other.presence;
+        const { state, map, gametype, game, players, maximum, host, invite, hostKey, locked } = other.presence;
+        const joinable = other.presence.public || settings.join;
         Object.assign(view, { state, map, gametype, game, players, maximum, host });
-        if (friend && settings.join && invite) view.invite = invite;
+        if (friend && joinable && invite) view.invite = invite;
+        else if (friend && joinable && hostKey) Object.assign(view, { hostKey, locked: Boolean(locked) });
+        else if (friend && (other.presence.private || invite || hostKey)) view.private = true;
     }
     if (!view.online && settings.activity && settings.friends && other.lastSeenAt) view.lastSeenAt = other.lastSeenAt;
     return view;
+}
+
+/** what the account itself is doing, as its own card says it (it is asking: online) */
+function ownPresence(account) {
+    const { state, map, gametype, game, players, maximum, host } = account.presence || {};
+    return account.presence ? { online: true, state, map, gametype, game, players, maximum, host } : { online: true };
 }
 
 /** (POST /presence, every 45 seconds or so) what the game is doing; the friends online and the requests waiting */
@@ -759,14 +819,31 @@ async function setPresence(key, body) {
     if (!parsedKey) return error('unauthorized', 401);
     const account = await accountOf(parsedKey, { name: parseName(body?.name) });
     const presence = { ...parsePresence(body), at: new Date() };
-    if (!settingsOf(account).join) presence.invite = '';
+    if (!settingsOf(account).join && !presence.public && (presence.invite || presence.hostKey)) {
+        Object.assign(presence, { invite: '', hostKey: '', private: true });
+    }
     await (await collection(ACCOUNTS)).updateOne({ keyHash: account.keyHash }, { $set: { presence } });
-    const { friends, incoming } = await friendshipsOf(account);
+    const friendships = await friendshipsOf(account);
+    const { friends, incoming } = friendships;
     const others = await accountsByHash(friends.map((row) => otherHash(row, account.keyHash)));
     return {
         friendsOnline: others.filter((other) => presenceView(other).online).length,
         requests: incoming.length,
+        friends: friendshipsKey(account.keyHash, friendships, others),
     };
+}
+
+/**
+ * (POST /presence/offline) the game closed: offline at once, not ONLINE_MS
+ * after (a browser's tab says it as it closes, navigator.sendBeacon: the key
+ * in the body). Not an account made, nor its lastSeenAt changed
+ */
+async function setOffline(key) {
+    await ensureIndexes();
+    const parsedKey = accountKey(typeof key === 'string' ? key.trim() : key);
+    if (!parsedKey) return error('unauthorized', 401);
+    await (await collection(ACCOUNTS)).updateOne({ keyHash: hashKey(parsedKey) }, { $set: { offlineAt: new Date() } });
+    return {};
 }
 
 // ---------- friends
@@ -800,6 +877,32 @@ async function friendshipOf(account, other) {
 }
 
 /** what one account is to another: friend, incoming (asked to be its), outgoing (it asked), none */
+/**
+ * the account's friendships as a short key: changed when one is asked,
+ * accepted, declined or removed, and when what a friend is doing changes (its
+ * accounts given: online, playing, its invite) (the game asks for /friends
+ * again then, and says in its chat what changed)
+ */
+function friendshipsKey(keyHash, { friends, incoming, outgoing }, others = []) {
+    const now = Date.now();
+    const doing = new Map(others.map((other) => [other.keyHash, presenceView(other, { friend: true, now })]));
+    const rows = [...friends.map((row) => {
+        const view = { ...(doing.get(otherHash(row, keyHash)) || {}) };
+        delete view.lastSeenAt;
+        return `f${otherHash(row, keyHash)}${JSON.stringify(view)}`;
+    }),
+    ...incoming.map((row) => `i${otherHash(row, keyHash)}`),
+    ...outgoing.map((row) => `o${otherHash(row, keyHash)}`)].sort();
+    return crypto.createHash('sha256').update(rows.join(',')).digest('hex').slice(0, 16);
+}
+
+/** (the chat's polls) the account's friendships' key, its friends' presence in it */
+async function friendsKeyOf(account) {
+    const friendships = await friendshipsOf(account);
+    const others = await accountsByHash(friendships.friends.map((row) => otherHash(row, account.keyHash)));
+    return friendshipsKey(account.keyHash, friendships, others);
+}
+
 function relationOf(friendship, keyHash) {
     if (!friendship) return 'none';
     if (friendship.state === 'friends') return 'friends';
@@ -931,7 +1034,8 @@ async function getPlayer(key, code, query) {
     return {
         player: {
             ...publicAccount(other, account.keyHash),
-            ...(self ? { online: true } : presenceView(other, { friend: relation === 'friends' })),
+            // (its own: what it is doing as its friends see it, its settings aside)
+            ...(self ? ownPresence(other) : presenceView(other, { friend: relation === 'friends' })),
             relation,
             muted: hasHash(account.muted, other.keyHash),
             blocked: hasHash(account.blocked, other.keyHash),
@@ -1033,16 +1137,18 @@ module.exports = {
     internals: {
         ACCOUNTS, ACCOUNT_MATCHES, CHAT_MESSAGES, CHAT_BURST, CHAT_REFILL_MS, ROOM_MEMBER_MS,
         accountKey, hashKey, normalizeCode, newCode, newPublicId, idFor, accountQuery, parseMatch, matchIncrements, publicTotals, parseChatText,
-        parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms, REPORTED_HIDE_COUNT, ONLINE_MS,
+        parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms, REPORTED_HIDE_COUNT, ONLINE_MS, OFFLINE_GRACE_MS, POLLING_ONLINE_MS,
         parseSettings, settingsOf, unflatten, parsePresence, presenceView, pairKey, relationOf,
     },
     hello,
     getAccount,
+    changeCode,
     submitMatch,
     getMatches,
     sendChat,
     pollChat,
     setPresence,
+    setOffline,
     getFriends,
     requestFriend,
     acceptFriend,
