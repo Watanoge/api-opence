@@ -14,7 +14,8 @@
  * - account_matches: every match and level the game sent, as it came (a
  *   match sent twice, by its matchId, is taken once)
  * - chat_messages: the fork's chat lines, numbered in order (seq, from
- *   counters' "chat"), kept CHAT_KEEP_DAYS: global ones, a match's (its room,
+ *   counters' "chat"), kept only CHAT_KEEP_MINUTES (as IRC: no history, a
+ *   line is there for the polls that follow it): global ones, a match's (its room,
  *   a key the game makes for the game it is in) and its teams', and private
  *   ones between two accounts
  * - friendships: two accounts (a and b, their pair's key the two hashes in
@@ -53,9 +54,10 @@ const MEDAL_KEYS_MAX = 64;
 
 const CHAT_CHANNELS = new Set(['global', 'match', 'team', 'private']);
 const CHAT_TEXT_MAX = 200;
-const CHAT_KEEP_DAYS = 14;
-/** the lines a first poll gets of what was said before it */
-const CHAT_BACKLOG = 30;
+/** a line is kept this long: long enough for every client's next poll (the
+ * game's slowest is 15 seconds, after a failure), then gone (MongoDB's TTL
+ * sweep runs about once a minute) */
+const CHAT_KEEP_MINUTES = 10;
 const CHAT_POLL_MAX = 100;
 /** an account's lines: CHAT_BURST at once, another each CHAT_REFILL_MS */
 const CHAT_BURST = 5;
@@ -84,6 +86,19 @@ const PLAYER_MATCHES_MAX = 20;
 const MODERATION_ACTIONS = new Set(['mute', 'unmute', 'block', 'unblock', 'report']);
 
 let indexesEnsured = null;
+
+/** the lines' TTL index, made again when an older server made it with another expiry (14 days) */
+async function ensureChatExpiry(messages) {
+    const expireAfterSeconds = CHAT_KEEP_MINUTES * 60;
+    try {
+        await messages.createIndex({ at: 1 }, { expireAfterSeconds });
+    } catch (err) {
+        // (IndexOptionsConflict, or IndexKeySpecsConflict: the same key, another expiry)
+        if (err?.code !== 85 && err?.code !== 86) throw err;
+        await messages.dropIndex('at_1');
+        await messages.createIndex({ at: 1 }, { expireAfterSeconds });
+    }
+}
 const chatRates = new Map();
 const rooms = new Map();
 
@@ -102,7 +117,7 @@ function ensureIndexes() {
             await messages.createIndex({ room: 1, seq: 1 });
             await messages.createIndex({ toHash: 1, seq: 1 });
             await messages.createIndex({ fromHash: 1, seq: 1 });
-            await messages.createIndex({ at: 1 }, { expireAfterSeconds: CHAT_KEEP_DAYS * 86400 });
+            await ensureChatExpiry(messages);
             await accounts.createIndex({ blocked: 1 });
             const friendships = await collection(FRIENDSHIPS);
             await friendships.createIndex({ pair: 1 }, { unique: true });
@@ -554,7 +569,7 @@ async function sendChat(key, body) {
     if (channel === 'team') message.team = team;
     if (channel === 'private') {
         const recipient = await (await collection(ACCOUNTS)).findOne({ code: toCode });
-        if (!recipient) return error('not_found', 404);
+        if (!recipient) return error('no_player', 404);
         // (one either blocked, or that takes no private lines, hears none)
         if (hasHash(account.blocked, recipient.keyHash)) return error('blocked', 403);
         if (hasHash(recipient.blocked, account.keyHash)) return error('unavailable', 403);
@@ -569,8 +584,8 @@ async function sendChat(key, body) {
 }
 
 /**
- * the lines an account hears after a line's number (after: 0 or none, the
- * last CHAT_BACKLOG said and where they end): global ones (unless global is
+ * the lines an account hears after a line's number (after: 0 or none, none:
+ * only where they end, so that nothing said before is heard): global ones (unless global is
  * 0), the room's, its team's (with team), and its private ones (unless its
  * privateChat is off); and the room's players. Never those of accounts it
  * muted or blocked or that blocked it; those of accounts reported by
@@ -603,7 +618,7 @@ async function pollChat(key, query) {
         rows = await messages.find({ seq: { $gt: after }, ...filter }).sort({ seq: 1 }).limit(CHAT_POLL_MAX)
             .toArray();
     } else {
-        rows = (await messages.find(filter).sort({ seq: -1 }).limit(CHAT_BACKLOG).toArray()).reverse();
+        rows = [];
     }
     let cursor = after;
     if (rows.length) {
@@ -760,7 +775,8 @@ async function accountAndOther(key, code) {
     if (!otherCode) return { failed: validationError(['code is not valid']) };
     const account = await accountOf(parsedKey);
     const other = await (await collection(ACCOUNTS)).findOne({ code: otherCode });
-    if (!other) return { failed: error('not_found', 404) };
+    // (no_player, not not_found: the game tells it from a route this server lacks)
+    if (!other) return { failed: error('no_player', 404) };
     if (other.keyHash === account.keyHash) return { account, other, self: true };
     return { account, other };
 }
@@ -803,7 +819,7 @@ async function acceptFriend(key, body) {
     if (failed) return failed;
     if (self) return validationError(['that is your own code']);
     const existing = await friendshipOf(account, other);
-    if (!existing || existing.requester === account.keyHash) return error('not_found', 404);
+    if (!existing || existing.requester === account.keyHash) return error('no_request', 404);
     if (existing.state !== 'friends') {
         await (await collection(FRIENDSHIPS)).updateOne({ _id: existing._id },
             { $set: { state: 'friends', since: new Date() } });
