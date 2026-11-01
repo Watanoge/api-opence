@@ -1,6 +1,7 @@
 /**
  * OpenCE's community server: Halo CE Universal's online leaderboards and
- * daily challenges (routes/routes_halo.js). The game's community.server is
+ * daily challenges (routes/routes_halo.js), and its accounts, their records
+ * and the fork's chat (routes/routes_social.js). The game's community.server is
  * this server's address (https://oceapi.watanoge.com). Its developer portal
  * is its own page (public/index.html), and the management of its challenges
  * and leaderboards /admin's (public/admin.html, routes/routes_admin.js).
@@ -10,6 +11,7 @@ const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const haloRoutes = require('./routes/routes_halo');
+const socialRoutes = require('./routes/routes_social');
 const adminRoutes = require('./routes/routes_admin');
 
 const app = express();
@@ -43,6 +45,7 @@ app.use('/portal', express.static(publicDirectory, { index: false, maxAge: '1h' 
 
 app.use('/admin/api', adminRoutes);
 app.use('/', haloRoutes);
+app.use('/', socialRoutes);
 
 // (anything else, and a body that is not JSON: an answer as the others are,
 // with the CORS headers above, so a browser can read why)
