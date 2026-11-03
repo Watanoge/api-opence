@@ -23,6 +23,9 @@
     <div class="card stat"><div class="label">Server day</div><div class="value" id="s-day">–</div></div>
     <div class="card stat"><div class="label">Day ends in</div><div class="value" id="s-ends">–</div></div>
     <div class="card stat"><div class="label">Database</div><div class="value" id="s-db">–</div></div>
+    <div class="card stat"><div class="label">Registered players</div><div class="value" id="s-registered">–</div></div>
+    <div class="card stat"><div class="label">Currently playing</div><div class="value" id="s-online">–</div></div>
+    <div class="card stat"><div class="label">Total hours played</div><div class="value" id="s-hours">–</div></div>
   </section>
 
   <section class="grid two">
@@ -134,6 +137,11 @@ async function load() {
     const left = Math.max(0, new Date(status.dayEndsAt) - new Date(status.serverTime));
     $('s-ends').textContent = `${Math.floor(left / 3600e3)}h ${Math.floor(left / 60e3) % 60}m`;
     $('s-db').textContent = status.database === 'ok' ? 'OK' : 'Down';
+    if (status.community) {
+      $('s-registered').textContent = status.community.registered.toLocaleString();
+      $('s-online').textContent = status.community.online.toLocaleString();
+      $('s-hours').textContent = status.community.playedHours.toLocaleString();
+    }
     $('status-pill').textContent = status.database === 'ok' ? 'online' : 'database down';
     $('status-pill').className = `badge ${status.database === 'ok' ? 'good' : 'bad'}`;
   } catch (error) {

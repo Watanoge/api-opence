@@ -372,6 +372,12 @@ async function redeemSyncCode(key, body, now = Date.now()) {
     if (mine.skulls) await applySkulls(await accounts.findOne({ keyHash: target.keyHash }), {
         unlocked: (mine.skulls.unlocked || []).join(','),
     });
+    // (the name picked on either: the account's own first)
+    if (!target.displayName && mine.displayName) {
+        await accounts.updateOne({ keyHash: target.keyHash }, { $set: {
+            displayName: mine.displayName, ...(!target.nameColor && mine.nameColor ? { nameColor: mine.nameColor } : {}),
+        } });
+    }
     await accounts.deleteOne({ keyHash: mine.keyHash });
 
     const joined = await accounts.findOne({ keyHash: target.keyHash });

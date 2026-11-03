@@ -139,9 +139,10 @@ test('another account is known by its public id, its own by its code', () => {
 
 test('presence shows what the other lets it', () => {
     const now = Date.now();
-    const presence = { state: 'multiplayer', map: 'bloodgulch', invite: 'halo://join/' + 'a'.repeat(64) };
+    const presence = { state: 'multiplayer', platform: 'android', map: 'bloodgulch', invite: 'halo://join/' + 'a'.repeat(64) };
     const other = { lastSeenAt: new Date(now - 1000), presence };
     assert.strictEqual(social.presenceView(other, { now }).online, true);
+    assert.strictEqual(social.presenceView(other, { now }).platform, 'android');
     assert.strictEqual(social.presenceView(other, { now }).map, 'bloodgulch');
     assert.strictEqual(social.presenceView(other, { now }).invite, undefined);
     assert.strictEqual(social.presenceView(other, { friend: true, now }).invite, presence.invite);
@@ -149,6 +150,7 @@ test('presence shows what the other lets it', () => {
     assert.strictEqual(social.presenceView(away, { friend: true, now }).online, false);
     const hidden = { ...other, settings: { activity: false } };
     assert.deepStrictEqual(social.presenceView(hidden, { friend: true, now }), { online: true });
+    assert.strictEqual(social.parsePresence({ platform: 'unsupported', state: 'menus' }).platform, 'unsupported');
     const noJoin = { ...other, settings: { join: false } };
     assert.strictEqual(social.presenceView(noJoin, { friend: true, now }).invite, undefined);
     const noFriends = { ...other, settings: { friends: false } };

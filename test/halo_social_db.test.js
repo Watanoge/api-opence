@@ -96,6 +96,20 @@ async function exercise(social) {
     assert.strictEqual((await social.changeCode(key('b'))).status, 429);
     codeTwo = changed.account.code;
 
+    // (a name and colour picked: the chat's, whatever a profile says after)
+    const named = await social.setAccountName(key('b'), { name: ' Chief\u0007 ', color: '#FF8800' });
+    assert.strictEqual(named.account.displayName, 'Chief');
+    assert.strictEqual(named.account.nameColor, 'ff8800');
+    await social.hello(key('b'), { name: 'Profile' });
+    assert.strictEqual((await social.getAccount(key('b'))).account.name, 'Chief');
+    assert.strictEqual((await social.setAccountName(key('b'), { name: 'Other' })).status, 429);
+    assert.strictEqual((await social.setAccountName(key('b'), { color: 'red' })).status, 422);
+    assert.strictEqual((await social.setAccountName(key('b'), {})).status, 422);
+    const said = await social.sendChat(key('b'), { channel: 'global', text: 'hello' });
+    assert.strictEqual(said.message.name, 'Chief');
+    assert.strictEqual(said.message.nameColor, 'ff8800');
+    assert.strictEqual((await social.setAccountName(key('b'), { color: '' })).account.nameColor, null);
+
     // (presence: a friend sees the game and its invite)
     // (and the friendships' key changes with what a friend is doing)
     const invite = `halo://join/${'f'.repeat(64)}`;

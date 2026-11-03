@@ -35,6 +35,7 @@ const {
     hello,
     getAccount,
     changeCode,
+    setAccountName,
     submitMatch,
     getMatches,
     sendChat,
@@ -84,6 +85,9 @@ router.get('/account', respond('GET /account',
 
 router.post('/account/code', respond('POST /account/code',
     (req) => changeCode(accountKey(req))));
+
+router.post('/account/name', respond('POST /account/name',
+    (req) => setAccountName(accountKey(req), req.body)));
 
 router.post('/account/sync/code', respond('POST /account/sync/code',
     (req) => createSyncCode(accountKey(req), req.body)));

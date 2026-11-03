@@ -24,6 +24,7 @@ const {
     submitChallengeScore,
     setChallenge,
 } = require('../database/halo_sql');
+const { getCommunityStats } = require('../database/halo_social');
 const { databaseReachable, isDatabaseError } = require('../database/db');
 
 const router = express.Router();
@@ -53,7 +54,17 @@ function respond(name, handler) {
 
 router.get('/status', async (_req, res) => {
     const database = await databaseReachable();
-    res.status(database ? 200 : 503).json({ data: { ...getStatus(), database: database ? 'ok' : 'unavailable' } });
+    let community;
+    if (database) {
+        try {
+            community = await getCommunityStats();
+        } catch (err) {
+            console.error('GET /status community:', err);
+        }
+    }
+    res.status(database ? 200 : 503).json({
+        data: { ...getStatus(), database: database ? 'ok' : 'unavailable', ...(community ? { community } : {}) },
+    });
 });
 
 router.post('/levels/scores', respond('POST /levels/scores',

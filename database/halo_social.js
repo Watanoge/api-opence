@@ -12,7 +12,10 @@
  * which every answer gives in place of another account's code (idFor); a
  * request names another account by either, and a friend request by its code
  * is taken even when the account takes no others (settings.requests off:
- * "code only"). The name is the one the game last sent.
+ * "code only"). The name is the one the
+ * account picked (displayName, POST /account/name, the same on every device
+ * and platform) else the one the game last sent (a profile's); with it a
+ * colour the chat shows it in (nameColor, RRGGBB).
  *
  * - account_links, sync_codes: installs that took the account's sync code (halo_sync.js)
  * - accounts: the account, its totals (stats.multiplayer, stats.campaign)
@@ -56,6 +59,10 @@ const FRIENDSHIPS = 'friendships';
 const ACCOUNT_REPORTS = 'account_reports';
 
 const NAME_MAX_LEN = 32;
+// (the name an account picks, shown in chat in place of its profiles' names: set again at most this often)
+const DISPLAY_NAME_MAX_LEN = 20;
+const NAME_CHANGE_MS = 10000;
+const NAME_COLOR_PATTERN = /^[0-9a-f]{6}$/;
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const CODE_LENGTH = 8;
 // (a friend code drawn anew at most this often)
@@ -360,7 +367,7 @@ function publicTotals(totals = {}) {
 function publicAccount(account, viewerHash = account.keyHash) {
     return {
         code: idFor(account, viewerHash),
-        name: account.name || null,
+        name: account.displayName || account.name || null,
         createdAt: account.createdAt,
         stats: {
             multiplayer: publicTotals(account.stats?.multiplayer),
@@ -387,7 +394,13 @@ function settingsOf(account) {
 
 /** an account as the game shows its own: its totals, its settings, and whether other installs are part of it (synced) */
 function ownAccount(account) {
-    return { ...publicAccount(account), settings: settingsOf(account), synced: (account.linkedDevices || 0) > 0 };
+    return {
+        ...publicAccount(account),
+        displayName: account.displayName || null,
+        nameColor: account.nameColor || null,
+        settings: settingsOf(account),
+        synced: (account.linkedDevices || 0) > 0,
+    };
 }
 
 // ---------- accounts
@@ -490,6 +503,52 @@ async function changeCode(key, now = Date.now()) {
         }
     }
     throw new Error('could not draw an account code');
+}
+
+/**
+ * (POST /account/name) the name and the colour the account is known by in
+ * the chat, whatever its devices' profiles are called: name ("" takes it
+ * back, to the profile's), color (RRGGBB; "" for none). One or both
+ */
+async function setAccountName(key, body, now = Date.now()) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const errors = [];
+    const set = {};
+    const unset = {};
+    const hasName = typeof body?.name === 'string';
+    const hasColor = typeof body?.color === 'string';
+    if (!hasName && !hasColor) errors.push('name or color is required');
+    let name = null;
+    if (hasName) {
+        // (printable, trimmed: one the same as the profile's is still the account's)
+        name = body.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, DISPLAY_NAME_MAX_LEN);
+        if (body.name.trim() && !name) errors.push('name is not printable');
+    }
+    const color = hasColor ? body.color.trim().replace(/^#/, '').toLowerCase() : '';
+    if (hasColor && color && !NAME_COLOR_PATTERN.test(color)) errors.push('color must be RRGGBB');
+    if (errors.length) return validationError(errors);
+    const account = await accountOf(parsedKey);
+    if (hasName && name !== (account.displayName || '')) {
+        if (account.nameChangedAt && now - new Date(account.nameChangedAt).getTime() < NAME_CHANGE_MS) {
+            return error('too_soon', 429);
+        }
+        if (name) set.displayName = name;
+        else unset.displayName = '';
+        set.nameChangedAt = new Date(now);
+    }
+    if (hasColor) {
+        if (color) set.nameColor = color;
+        else unset.nameColor = '';
+    }
+    const update = {};
+    if (Object.keys(set).length) update.$set = set;
+    if (Object.keys(unset).length) update.$unset = unset;
+    if (!Object.keys(update).length) return { account: ownAccount(account) };
+    const accounts = await collection(ACCOUNTS);
+    await accounts.updateOne({ keyHash: account.keyHash }, update);
+    return { account: ownAccount(await accounts.findOne({ keyHash: account.keyHash })) };
 }
 
 async function submitMatch(key, body) {
@@ -628,6 +687,7 @@ function publicMessage(message, viewerHash = null) {
         ...(message.team !== undefined && message.team !== null ? { team: message.team } : {}),
         from,
         name: message.name,
+        ...(message.nameColor ? { nameColor: message.nameColor } : {}),
         ...(message.to ? { to, toName: message.toName } : {}),
         text: message.text,
         at: message.at,
@@ -663,6 +723,7 @@ async function sendChat(key, body) {
         text,
         at: new Date(),
     };
+    if (account.nameColor) message.nameColor = account.nameColor;
     if (channel === 'match' || channel === 'team') message.room = room;
     if (channel === 'team') message.team = team;
     if (channel === 'private') {
@@ -767,6 +828,7 @@ function parsePresence(body) {
     const hostKey = typeof body?.hostKey === 'string' ? body.hostKey.trim().toLowerCase() : '';
     return {
         state,
+        platform: parseLabel(body?.platform, 32),
         map: parseLabel(body?.map, 64),
         gametype: parseLabel(body?.gametype, 48),
         game: parseLabel(body?.game, 48),
@@ -799,9 +861,9 @@ function presenceView(other, { friend = false, now = Date.now() } = {}) {
     const settings = settingsOf(other);
     const view = { online: settings.friends && online(other, now) };
     if (view.online && settings.activity && other.presence) {
-        const { state, map, gametype, game, players, maximum, host, invite, hostKey, locked } = other.presence;
+        const { state, platform, map, gametype, game, players, maximum, host, invite, hostKey, locked } = other.presence;
         const joinable = other.presence.public || settings.join;
-        Object.assign(view, { state, map, gametype, game, players, maximum, host });
+        Object.assign(view, { state, platform, map, gametype, game, players, maximum, host });
         if (friend && joinable && invite) view.invite = invite;
         else if (friend && joinable && hostKey) Object.assign(view, { hostKey, locked: Boolean(locked) });
         else if (friend && (other.presence.private || invite || hostKey)) view.private = true;
@@ -812,8 +874,8 @@ function presenceView(other, { friend = false, now = Date.now() } = {}) {
 
 /** what the account itself is doing, as its own card says it (it is asking: online) */
 function ownPresence(account) {
-    const { state, map, gametype, game, players, maximum, host } = account.presence || {};
-    return account.presence ? { online: true, state, map, gametype, game, players, maximum, host } : { online: true };
+    const { state, platform, map, gametype, game, players, maximum, host } = account.presence || {};
+    return account.presence ? { online: true, state, platform, map, gametype, game, players, maximum, host } : { online: true };
 }
 
 /** (POST /presence, every 45 seconds or so) what the game is doing; the friends online and the requests waiting */
@@ -836,6 +898,9 @@ async function setPresence(key, body) {
         friends: friendshipsKey(account.keyHash, friendships, others),
         // (other installs share the account: its skulls are theirs too)
         synced: (account.linkedDevices || 0) > 0,
+        // (what another device may have picked)
+        displayName: account.displayName || '',
+        nameColor: account.nameColor || '',
     };
 }
 
@@ -850,6 +915,33 @@ async function setOffline(key) {
     if (!parsedKey) return error('unauthorized', 401);
     await (await collection(ACCOUNTS)).updateOne({ keyHash: await resolveAccountHash(hashKey(parsedKey)) }, { $set: { offlineAt: new Date() } });
     return {};
+}
+
+/**
+ * (GET /status) the community's figures: the accounts made, those online now
+ * (as online() says, whatever their friend list setting: only counted) and
+ * the hours all of them played (their multiplayer and campaign seconds)
+ */
+async function getCommunityStats(now = Date.now()) {
+    await ensureIndexes();
+    const accounts = await collection(ACCOUNTS);
+    const since = new Date(now - ONLINE_MS);
+    const [registered, recent, totals] = await Promise.all([
+        accounts.estimatedDocumentCount(),
+        accounts.find({ lastSeenAt: { $gte: since } },
+            { projection: { lastSeenAt: 1, offlineAt: 1, chatPolledAt: 1 } }).toArray(),
+        accounts.aggregate([{ $group: {
+            _id: null,
+            seconds: { $sum: { $add: [{ $ifNull: ['$stats.multiplayer.seconds', 0] }, { $ifNull: ['$stats.campaign.seconds', 0] }] } },
+        } }]).toArray(),
+    ]);
+    const seconds = totals[0]?.seconds || 0;
+    return {
+        registered,
+        online: recent.filter((account) => online(account, now)).length,
+        playedSeconds: seconds,
+        playedHours: Math.round(seconds / 360) / 10,
+    };
 }
 
 // ---------- friends
@@ -916,7 +1008,7 @@ function relationOf(friendship, keyHash) {
 }
 
 function playerName(account) {
-    return account.name || account.publicId || account.code;
+    return account.displayName || account.name || account.publicId || account.code;
 }
 
 /** the account's friends (online first, then by name) with what they do, and the requests to and from it */
@@ -1144,18 +1236,20 @@ module.exports = {
         ACCOUNTS, ACCOUNT_MATCHES, CHAT_MESSAGES, CHAT_BURST, CHAT_REFILL_MS, ROOM_MEMBER_MS,
         accountKey, hashKey, normalizeCode, newCode, newPublicId, idFor, accountQuery, parseMatch, matchIncrements, publicTotals, parseChatText,
         parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms, REPORTED_HIDE_COUNT, ONLINE_MS, OFFLINE_GRACE_MS, POLLING_ONLINE_MS,
-        accountOf, ownAccount, error, validationError, parseInteger, ACCOUNT_REPORTS, FRIENDSHIPS, MATCH_KINDS,
+        accountOf, ownAccount, playerName, publicMessage, DISPLAY_NAME_MAX_LEN, NAME_CHANGE_MS, error, validationError, parseInteger, ACCOUNT_REPORTS, FRIENDSHIPS, MATCH_KINDS,
         parseSettings, settingsOf, unflatten, parsePresence, presenceView, pairKey, relationOf,
     },
     hello,
     getAccount,
     changeCode,
+    setAccountName,
     submitMatch,
     getMatches,
     sendChat,
     pollChat,
     setPresence,
     setOffline,
+    getCommunityStats,
     getFriends,
     requestFriend,
     acceptFriend,

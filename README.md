@@ -133,7 +133,7 @@ profile name the game sends with each score.
 
 | Method | Path | |
 | --- | --- | --- |
-| GET | `/status` | the server's version, time and day |
+| GET | `/status` | the server's version, time and day; `community`: `registered` accounts, `online` now, `playedSeconds` and `playedHours` of all of them |
 | POST | `/levels/scores` | a campaign level won |
 | GET | `/levels/:level/leaderboard` | `?limit=` (up to 50) |
 | GET | `/daily` | today's challenge (and the key's best of it) |
@@ -145,6 +145,7 @@ profile name the game sends with each score.
 | POST | `/account` | the game started: the account (made the first time), its totals and medals; `{name, platform, build}` |
 | GET | `/account` | the same, without noting the name |
 | POST | `/account/code` | the friend code drawn anew (the old one no longer finds the account; its public id, friends and requests stay); `429 too_soon` within a minute of the last |
+| POST | `/account/name` | the name (up to 20 characters; `""` takes it back to the profile's) and colour (`RRGGBB`; `""` for none) the chat shows the account by, on every device: `{name?, color?}`; `429 too_soon` within 10 seconds of the last name |
 | POST | `/account/matches` | a match or level played: `{matchId, kind: multiplayer\|campaign, result, score, kills, deaths, assists, suicides, betrayals, seconds, players, place, map, gametype, teams, medals: {key: count}, name}` |
 | GET | `/account/matches` | `?limit=` (up to 50) the latest |
 | POST | `/chat/messages` | a line: `{channel: global\|match\|team\|private, text, room, team, to, name}` |
