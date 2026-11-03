@@ -6,6 +6,11 @@
  *   POST /account                 the game started: the account, made the first time; {settings}
  *   GET  /account                 the account, its totals, medals and settings
  *   POST /account/code            its friend code drawn anew (once a minute at most)
+ *   POST /account/sync/code       {code?, skulls?} a sync code for another install, kept alive by asking again (45 seconds)
+ *   POST /account/sync/cancel     its sync code no longer good
+ *   POST /account/sync/redeem     {code} this install joins the account of the code (its friends, records, skulls)
+ *   POST /account/skulls          {style, unlocked, version, epoch, reset} the skulls shared by its installs; answers them
+ *   GET  /account/skulls          the skulls shared by its installs
  *   POST /account/matches         a match or a level played
  *   GET  /account/matches         ?limit= the latest
  *   POST /chat/messages           a line: global, match, team or private
@@ -45,6 +50,7 @@ const {
     getModeration,
     moderate,
 } = require('../database/halo_social');
+const { createSyncCode, cancelSyncCode, redeemSyncCode, syncSkulls } = require('../database/halo_sync');
 const { isDatabaseError } = require('../database/db');
 
 const router = express.Router();
@@ -78,6 +84,21 @@ router.get('/account', respond('GET /account',
 
 router.post('/account/code', respond('POST /account/code',
     (req) => changeCode(accountKey(req))));
+
+router.post('/account/sync/code', respond('POST /account/sync/code',
+    (req) => createSyncCode(accountKey(req), req.body)));
+
+router.post('/account/sync/cancel', respond('POST /account/sync/cancel',
+    (req) => cancelSyncCode(accountKey(req))));
+
+router.post('/account/sync/redeem', respond('POST /account/sync/redeem',
+    (req) => redeemSyncCode(accountKey(req), req.body)));
+
+router.post('/account/skulls', respond('POST /account/skulls',
+    (req) => syncSkulls(accountKey(req), req.body)));
+
+router.get('/account/skulls', respond('GET /account/skulls',
+    (req) => syncSkulls(accountKey(req), null)));
 
 router.post('/account/matches', respond('POST /account/matches',
     (req) => submitMatch(accountKey(req), req.body)));

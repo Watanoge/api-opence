@@ -14,6 +14,7 @@
  * is taken even when the account takes no others (settings.requests off:
  * "code only"). The name is the one the game last sent.
  *
+ * - account_links, sync_codes: installs that took the account's sync code (halo_sync.js)
  * - accounts: the account, its totals (stats.multiplayer, stats.campaign)
  *   and each medal's count (medals.<key>)
  * - account_matches: every match and level the game sent, as it came (a
@@ -45,6 +46,7 @@
  */
 const crypto = require('crypto');
 const { collection } = require('./db');
+const { ensureLinkIndexes, resolveAccountHash } = require('./halo_links');
 
 const ACCOUNTS = 'accounts';
 const ACCOUNT_MATCHES = 'account_matches';
@@ -129,6 +131,7 @@ const rooms = new Map();
 function ensureIndexes() {
     if (!indexesEnsured) {
         indexesEnsured = (async () => {
+            await ensureLinkIndexes();
             const accounts = await collection(ACCOUNTS);
             await accounts.createIndex({ keyHash: 1 }, { unique: true });
             await accounts.createIndex({ code: 1 }, { unique: true });
@@ -382,16 +385,17 @@ function settingsOf(account) {
     return Object.fromEntries(SETTING_FIELDS.map((field) => [field, account?.settings?.[field] !== false]));
 }
 
-/** an account as the game shows its own: its totals, and its settings */
+/** an account as the game shows its own: its totals, its settings, and whether other installs are part of it (synced) */
 function ownAccount(account) {
-    return { ...publicAccount(account), settings: settingsOf(account) };
+    return { ...publicAccount(account), settings: settingsOf(account), synced: (account.linkedDevices || 0) > 0 };
 }
 
 // ---------- accounts
 
 /** the account of the key: made the first time (with a code of its own), its name and client noted */
 async function accountOf(key, { name = null, client = {}, create = true, extra = {} } = {}) {
-    const keyHash = hashKey(key);
+    // (a synced device is its account's)
+    const keyHash = await resolveAccountHash(hashKey(key));
     const accounts = await collection(ACCOUNTS);
     const now = new Date();
     const set = { lastSeenAt: now, ...extra };
@@ -515,7 +519,7 @@ async function getMatches(key, query) {
     const parsedKey = accountKey(key);
     if (!parsedKey) return error('unauthorized', 401);
     const limit = parseLimit(query?.limit, 20, MATCH_HISTORY_MAX);
-    const rows = await (await collection(ACCOUNT_MATCHES)).find({ account: hashKey(parsedKey) })
+    const rows = await (await collection(ACCOUNT_MATCHES)).find({ account: await resolveAccountHash(hashKey(parsedKey)) })
         .sort({ playedAt: -1 }).limit(limit).toArray();
     return {
         matches: rows.map(({ _id, account, ...row }) => row),
@@ -830,6 +834,8 @@ async function setPresence(key, body) {
         friendsOnline: others.filter((other) => presenceView(other).online).length,
         requests: incoming.length,
         friends: friendshipsKey(account.keyHash, friendships, others),
+        // (other installs share the account: its skulls are theirs too)
+        synced: (account.linkedDevices || 0) > 0,
     };
 }
 
@@ -842,7 +848,7 @@ async function setOffline(key) {
     await ensureIndexes();
     const parsedKey = accountKey(typeof key === 'string' ? key.trim() : key);
     if (!parsedKey) return error('unauthorized', 401);
-    await (await collection(ACCOUNTS)).updateOne({ keyHash: hashKey(parsedKey) }, { $set: { offlineAt: new Date() } });
+    await (await collection(ACCOUNTS)).updateOne({ keyHash: await resolveAccountHash(hashKey(parsedKey)) }, { $set: { offlineAt: new Date() } });
     return {};
 }
 
@@ -1138,6 +1144,7 @@ module.exports = {
         ACCOUNTS, ACCOUNT_MATCHES, CHAT_MESSAGES, CHAT_BURST, CHAT_REFILL_MS, ROOM_MEMBER_MS,
         accountKey, hashKey, normalizeCode, newCode, newPublicId, idFor, accountQuery, parseMatch, matchIncrements, publicTotals, parseChatText,
         parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms, REPORTED_HIDE_COUNT, ONLINE_MS, OFFLINE_GRACE_MS, POLLING_ONLINE_MS,
+        accountOf, ownAccount, error, validationError, parseInteger, ACCOUNT_REPORTS, FRIENDSHIPS, MATCH_KINDS,
         parseSettings, settingsOf, unflatten, parsePresence, presenceView, pairKey, relationOf,
     },
     hello,

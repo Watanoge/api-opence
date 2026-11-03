@@ -18,6 +18,7 @@
  */
 const crypto = require('crypto');
 const { collection } = require('./db');
+const { PLAYER_LINKS, ensureLinkIndexes, syncedAccountHash } = require('./halo_links');
 const daily = require('../utils/halo_daily');
 
 const PLAYERS = 'players';
@@ -46,6 +47,7 @@ const lastSubmit = new Map();
 function ensureIndexes() {
     if (!indexesEnsured) {
         indexesEnsured = (async () => {
+            await ensureLinkIndexes();
             await (await collection(PLAYERS)).createIndex({ keyHash: 1 }, { unique: true });
             await (await collection(LEVEL_RUNS)).createIndex({ level: 1, submittedAt: -1 });
             await (await collection(LEVEL_BESTS)).createIndex({ level: 1, player: 1 }, { unique: true });
@@ -125,9 +127,68 @@ function parseRun(body) {
     return { errors, run, client };
 }
 
+/**
+ * a player's records of `from` (a profile of an install, as its key hashes)
+ * put under `to`, the account's profile of that name: each level's and each
+ * day's better of the two is kept, their runs and attempts added
+ */
+async function mergePlayers(from, to) {
+    const withBest = async (name, field, counter) => {
+        const scores = await collection(name);
+        for await (const row of scores.find({ player: from })) {
+            const other = await scores.findOne({ ...(field === 'level' ? { level: row.level } : { day: row.day }), player: to });
+            if (!other) {
+                await scores.updateOne({ _id: row._id }, { $set: { player: to } });
+                continue;
+            }
+            const winner = better(row, other) ? row : other;
+            const loser = winner === row ? other : row;
+            const set = { player: to };
+            if (field === 'day') {
+                const dayBest = better(row.dayBest || {}, other.dayBest) ? row.dayBest : other.dayBest;
+                if (dayBest) set.dayBest = dayBest;
+            }
+            await scores.deleteOne({ _id: loser._id });
+            await scores.updateOne({ _id: winner._id }, { $set: set, $inc: { [counter]: loser[counter] || 0 } });
+        }
+    };
+    await withBest(LEVEL_BESTS, 'level', 'runs');
+    await withBest(DAILY_SCORES, 'day', 'attempts');
+    await (await collection(LEVEL_RUNS)).updateMany({ player: from }, { $set: { player: to } });
+    const players = await collection(PLAYERS);
+    const old = await players.findOne({ keyHash: from });
+    if (old) {
+        await players.updateOne({ keyHash: to }, {
+            $set: { name: old.name, lastSeenAt: old.lastSeenAt },
+            $setOnInsert: { createdAt: old.createdAt || new Date() },
+        }, { upsert: true });
+        await players.deleteOne({ keyHash: from });
+    }
+}
+
+/**
+ * the hash a key's records are under: its own, unless its install is synced
+ * (halo_sync.js): then the account's, with the profile's part, so a profile
+ * of any of its devices is the same player. The records it had before are
+ * put there the first time it is asked.
+ */
+async function playerHash(key) {
+    const own = hashKey(key);
+    await ensureLinkIndexes();
+    const moved = await (await collection(PLAYER_LINKS)).findOne({ from: own });
+    if (moved) return moved.to;
+    const parts = /^([0-9a-f]{64})-([A-Za-z0-9]{1,16})$/.exec(key);
+    const account = await syncedAccountHash(hashKey(parts ? parts[1] : key));
+    if (!account) return own;
+    const to = hashKey(`${account}:${parts ? parts[2] : ''}`);
+    await mergePlayers(own, to);
+    await (await collection(PLAYER_LINKS)).updateOne({ from: own }, { $set: { to } }, { upsert: true });
+    return to;
+}
+
 /** the player of the key, made or renamed (its last name is the one shown) */
 async function playerOf(key, name) {
-    const keyHash = hashKey(key);
+    const keyHash = await playerHash(key);
     const now = new Date();
     await (await collection(PLAYERS)).updateOne({ keyHash },
         { $set: { name, lastSeenAt: now }, $setOnInsert: { createdAt: now } }, { upsert: true });
@@ -174,6 +235,7 @@ function publicRow(document, rank) {
 
 /** the rows of a collection's board (filter: its level or its day), and the player's own place */
 async function board(name, filter, limit, key) {
+    const player = key ? await playerHash(key) : null;
     const scores = await collection(name);
     const rows = await scores.find(filter).sort({ score: -1, seconds: 1, achievedAt: 1 }).limit(limit).toArray();
     const result = {
@@ -181,7 +243,7 @@ async function board(name, filter, limit, key) {
         players: await scores.countDocuments(filter),
     };
     if (key) {
-        const mine = await scores.findOne({ ...filter, player: hashKey(key) });
+        const mine = await scores.findOne({ ...filter, player });
         if (mine) {
             const ahead = await scores.countDocuments({ ...filter, $or: [
                 { score: { $gt: mine.score } },
@@ -297,7 +359,7 @@ async function getChallenge(day, key) {
 async function withMine(challenge, key) {
     const parsedKey = parseKey(key);
     if (!parsedKey) return challenge;
-    const mine = await (await collection(DAILY_SCORES)).findOne({ day: challenge.day, player: hashKey(parsedKey) });
+    const mine = await (await collection(DAILY_SCORES)).findOne({ day: challenge.day, player: await playerHash(parsedKey) });
     return mine ? { ...challenge, mine: { ...publicRow(mine, null), attempts: mine.attempts } } : challenge;
 }
 
@@ -324,7 +386,7 @@ async function getChallengeHistory(query, key) {
     let mine = {};
     const parsedKey = parseKey(key);
     if (parsedKey && days.length) {
-        const rows = await scores.find({ player: hashKey(parsedKey), day: { $in: days } }).toArray();
+        const rows = await scores.find({ player: await playerHash(parsedKey), day: { $in: days } }).toArray();
         for (const row of rows) {
             const ahead = await scores.countDocuments({ day: row.day, $or: [
                 { score: { $gt: row.score } },
