@@ -84,6 +84,17 @@ test('totals read zero where none was kept', () => {
     });
 });
 
+test('Firefight totals are counts, zeros where none was kept', () => {
+    assert.deepStrictEqual(social.parseFirefight({ kills: 3, sets: '2' }), {
+        matches: 0, sets: 2, waves: 0, kills: 3, bossKills: 0, deaths: 0, assists: 0, bestSpree: 0, score: 0, seconds: 0,
+    });
+    assert.strictEqual(social.parseFirefight({ kills: -1 }), null);
+    assert.strictEqual(social.parseFirefight({ kills: 1.5 }), null);
+    assert.strictEqual(social.parseFirefight([]), null);
+    assert.strictEqual(social.parseFirefight(undefined), null);
+    assert.deepStrictEqual(social.publicFirefight(undefined), social.parseFirefight({}));
+});
+
 test('chat text and rooms are checked', () => {
     assert.strictEqual(social.parseChatText('  hi\u0007 there '), 'hi  there');
     assert.strictEqual(social.parseChatText('   '), null);
@@ -180,4 +191,30 @@ test('a friendship is one pair, whoever asked', () => {
     assert.strictEqual(social.relationOf({ state: 'friends' }, 'a'), 'friends');
     assert.strictEqual(social.relationOf({ state: 'pending', requester: 'a' }, 'a'), 'outgoing');
     assert.strictEqual(social.relationOf({ state: 'pending', requester: 'b' }, 'a'), 'incoming');
+});
+
+test('an emblem is its indexes, or none', () => {
+    const emblem = social.parseEmblem({ foreground: 3, background: 2, primaryColor: 1, secondaryLayer: true });
+    assert.deepStrictEqual(emblem, {
+        secondaryLayer: true, foreground: 3, background: 2, primaryColor: 1, secondaryColor: 0, backgroundColor: 0, nameplate: 0,
+    });
+    assert.strictEqual(social.parseEmblem({ foreground: 300 }), null);
+    assert.strictEqual(social.parseEmblem({ foreground: 'skull' }), null);
+    assert.strictEqual(social.parseEmblem(null), null);
+    assert.strictEqual(social.parseEmblem([1]), null);
+});
+
+test('an account of a build before ranks shows no rank nor emblem', () => {
+    assert.deepStrictEqual(social.personView({}), { xp: null, emblem: null });
+    assert.deepStrictEqual(social.personView({ rank: { xp: 0 } }), { xp: 0, emblem: null });
+});
+
+test('a room says its players\' ranks and emblems', () => {
+    const emblem = { foreground: 1 };
+    social.roomNote('rank-room', 'AAAA-AAAA', 'Shown', 0, Date.now(), 'hash', 'pid', { player: 'Profile', xp: 500, emblem });
+    const [member] = social.roomMembers('rank-room');
+    assert.deepStrictEqual(member, {
+        code: 'AAAA-AAAA', name: 'Shown', team: 0, keyHash: 'hash', publicId: 'pid', player: 'Profile', xp: 500, emblem,
+    });
+    social.rooms.delete('rank-room');
 });

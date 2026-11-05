@@ -18,8 +18,11 @@
  * colour the chat shows it in (nameColor, RRGGBB).
  *
  * - account_links, sync_codes: installs that took the account's sync code (halo_sync.js)
- * - accounts: the account, its totals (stats.multiplayer, stats.campaign)
- *   and each medal's count (medals.<key>)
+ * - accounts: the account, its totals (stats.multiplayer, stats.campaign;
+ *   stats.firefight is the game's own career totals, as last sent with POST /account)
+ *   and each medal's count (medals.<key>); its service rank (rank.xp, only
+ *   ever raised but by a reset; rank.done: its past records were counted into
+ *   it) and its emblem (emblem, none until the player chose one)
  * - account_matches: every match and level the game sent, as it came (a
  *   match sent twice, by its matchId, is taken once). A match left before
  *   its end (completed false) has no result and says why (endReason: quit,
@@ -68,6 +71,10 @@ const CODE_LENGTH = 8;
 // (a friend code drawn anew at most this often)
 const CODE_CHANGE_MS = 60000;
 const MATCH_KINDS = new Set(['multiplayer', 'campaign']);
+// (the game keeps XP in a 32-bit long)
+const XP_MAX = 2147483647;
+const EMBLEM_NUMBERS = ['foreground', 'background', 'primaryColor', 'secondaryColor', 'backgroundColor', 'nameplate'];
+const FIREFIGHT_FIELDS = ['matches', 'sets', 'waves', 'kills', 'bossKills', 'deaths', 'assists', 'bestSpree', 'score', 'seconds'];
 const MATCH_RESULTS = new Set(['win', 'loss', 'tie']);
 const MATCH_END_REASONS = new Set(['quit', 'ended', 'disconnected']);
 const MATCH_HISTORY_MAX = 50;
@@ -364,14 +371,52 @@ function publicTotals(totals = {}) {
     return Object.fromEntries(fields.map((field) => [field, totals[field] || 0]));
 }
 
+/** a career's Firefight totals, as POST /account sends them: null for none, or any not a count */
+function parseFirefight(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const totals = {};
+    for (const field of FIREFIGHT_FIELDS) {
+        totals[field] = parseInteger(value[field] ?? 0, 0, Number.MAX_SAFE_INTEGER);
+        if (totals[field] === null) return null;
+    }
+    return totals;
+}
+
+/** the Firefight totals as the game reads them (zeros for none) */
+function publicFirefight(totals = {}) {
+    return Object.fromEntries(FIREFIGHT_FIELDS.map((field) => [field, totals[field] || 0]));
+}
+
+/** an emblem as the game sends it (indexes into its emblem tables): null for none, or any not one */
+function parseEmblem(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const emblem = { secondaryLayer: value.secondaryLayer === true };
+    for (const field of EMBLEM_NUMBERS) {
+        emblem[field] = parseInteger(value[field] ?? 0, 0, 255);
+        if (emblem[field] === null) return null;
+    }
+    return emblem;
+}
+
+/** what other players are shown of an account: null for what it never had
+ * (an account of a build before ranks: the game shows no rank nor emblem) */
+function personView(account) {
+    return {
+        xp: account.rank ? account.rank.xp || 0 : null,
+        emblem: account.emblem || null,
+    };
+}
+
 function publicAccount(account, viewerHash = account.keyHash) {
     return {
         code: idFor(account, viewerHash),
         name: account.displayName || account.name || null,
         createdAt: account.createdAt,
+        ...personView(account),
         stats: {
             multiplayer: publicTotals(account.stats?.multiplayer),
             campaign: publicTotals(account.stats?.campaign),
+            firefight: publicFirefight(account.stats?.firefight),
         },
         medals: account.medals || {},
     };
@@ -398,6 +443,7 @@ function ownAccount(account) {
         ...publicAccount(account),
         displayName: account.displayName || null,
         nameColor: account.nameColor || null,
+        rankDone: Boolean(account.rank?.done),
         settings: settingsOf(account),
         synced: (account.linkedDevices || 0) > 0,
     };
@@ -426,7 +472,7 @@ async function accountOf(key, { name = null, client = {}, create = true, extra =
     for (let attempt = 0; attempt < 5; attempt++) {
         try {
             const account = {
-                keyHash, code: newCode(), publicId: newPublicId(), ...unflatten(set), createdAt: now, stats: {}, medals: {},
+                keyHash, code: newCode(), publicId: newPublicId(), stats: {}, medals: {}, ...unflatten(set), createdAt: now,
             };
             await accounts.insertOne(account);
             return account;
@@ -461,14 +507,20 @@ async function hello(key, body) {
     await ensureIndexes();
     const parsedKey = accountKey(key);
     if (!parsedKey) return error('unauthorized', 401);
+    const firefight = parseFirefight(body?.firefight);
+    const xp = parseInteger(body?.xp ?? 0, 0, XP_MAX) ?? 0;
     const account = await accountOf(parsedKey, {
         name: parseName(body?.name),
         client: {
             platform: typeof body?.platform === 'string' ? body.platform.slice(0, 32) : undefined,
             build: parseInteger(body?.build ?? 0, 0, 100000000) ?? 0,
         },
-        extra: settingsSet(parseSettings(body?.settings)),
+        extra: { ...settingsSet(parseSettings(body?.settings)), ...(firefight ? { 'stats.firefight': firefight } : {}) },
     });
+    if (xp > (account.rank?.xp || 0)) {
+        await (await collection(ACCOUNTS)).updateOne({ keyHash: account.keyHash }, { $max: { 'rank.xp': xp } });
+        account.rank = { ...account.rank, xp };
+    }
     return { account: ownAccount(account) };
 }
 
@@ -510,6 +562,11 @@ async function changeCode(key, now = Date.now()) {
  * the chat, whatever its devices' profiles are called: name ("" takes it
  * back, to the profile's), color (RRGGBB; "" for none). One or both
  */
+/** (printable, trimmed: one the same as the profile's is still the account's) */
+function parseDisplayName(value) {
+    return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, DISPLAY_NAME_MAX_LEN);
+}
+
 async function setAccountName(key, body, now = Date.now()) {
     await ensureIndexes();
     const parsedKey = accountKey(key);
@@ -522,8 +579,7 @@ async function setAccountName(key, body, now = Date.now()) {
     if (!hasName && !hasColor) errors.push('name or color is required');
     let name = null;
     if (hasName) {
-        // (printable, trimmed: one the same as the profile's is still the account's)
-        name = body.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, DISPLAY_NAME_MAX_LEN);
+        name = parseDisplayName(body.name);
         if (body.name.trim() && !name) errors.push('name is not printable');
     }
     const color = hasColor ? body.color.trim().replace(/^#/, '').toLowerCase() : '';
@@ -548,6 +604,67 @@ async function setAccountName(key, body, now = Date.now()) {
     if (!Object.keys(update).length) return { account: ownAccount(account) };
     const accounts = await collection(ACCOUNTS);
     await accounts.updateOne({ keyHash: account.keyHash }, update);
+    return { account: ownAccount(await accounts.findOne({ keyHash: account.keyHash })) };
+}
+
+/** (POST /account/setup) the player's first setup: its name, chat colour and
+ * emblem together. A name taken here is not held to NAME_CHANGE_MS */
+async function setupAccount(key, body, now = Date.now()) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const errors = [];
+    const name = typeof body?.name === 'string' ? parseDisplayName(body.name) : '';
+    if (!name) errors.push('name is required');
+    const color = typeof body?.color === 'string' ? body.color.trim().replace(/^#/, '').toLowerCase() : '';
+    if (color && !NAME_COLOR_PATTERN.test(color)) errors.push('color must be RRGGBB');
+    const emblem = parseEmblem(body?.emblem);
+    if (!emblem) errors.push('emblem is required');
+    if (errors.length) return validationError(errors);
+    const account = await accountOf(parsedKey);
+    const accounts = await collection(ACCOUNTS);
+    await accounts.updateOne({ keyHash: account.keyHash }, {
+        $set: { displayName: name, nameChangedAt: new Date(now), emblem },
+        ...(color ? {} : { $unset: { nameColor: '' } }),
+        // (ranked from here on, at no XP for one that had none)
+        $max: { 'rank.xp': 0 },
+    });
+    if (color) await accounts.updateOne({ keyHash: account.keyHash }, { $set: { nameColor: color } });
+    return { account: ownAccount(await accounts.findOne({ keyHash: account.keyHash })) };
+}
+
+/** (POST /account/emblem) the emblem changed */
+async function setEmblem(key, body) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const emblem = parseEmblem(body?.emblem);
+    if (!emblem) return validationError(['emblem is required']);
+    const account = await accountOf(parsedKey);
+    const accounts = await collection(ACCOUNTS);
+    await accounts.updateOne({ keyHash: account.keyHash }, { $set: { emblem } });
+    return { account: ownAccount(await accounts.findOne({ keyHash: account.keyHash })) };
+}
+
+/** (POST /account/rank) {xp, done}: the rank raised to xp, done saying its
+ * past records were counted into it; {reset: true}: none of it (the game's
+ * CLEAR RANK, for testing), its records to be counted again */
+async function setRank(key, body) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const account = await accountOf(parsedKey);
+    const accounts = await collection(ACCOUNTS);
+    if (body?.reset === true) {
+        await accounts.updateOne({ keyHash: account.keyHash }, { $set: { rank: { xp: 0, done: false } } });
+    } else {
+        const xp = parseInteger(body?.xp, 0, XP_MAX);
+        if (xp === null) return validationError(['xp must be a count']);
+        await accounts.updateOne({ keyHash: account.keyHash }, {
+            $max: { 'rank.xp': xp },
+            ...(body?.done === true ? { $set: { 'rank.done': true } } : {}),
+        });
+    }
     return { account: ownAccount(await accounts.findOne({ keyHash: account.keyHash })) };
 }
 
@@ -619,13 +736,13 @@ function parseRoom(value) {
 }
 
 /** a room's players, as polls note them (the account's code, name and team) */
-function roomNote(room, code, name, team, now = Date.now(), keyHash = null, publicId = null) {
+function roomNote(room, code, name, team, now = Date.now(), keyHash = null, publicId = null, person = {}) {
     let members = rooms.get(room);
     if (!members) {
         members = new Map();
         rooms.set(room, members);
     }
-    members.set(code, { code, name, team, at: now, keyHash, publicId });
+    members.set(code, { code, name, team, at: now, keyHash, publicId, ...person });
 }
 
 function roomMembers(room, now = Date.now()) {
@@ -638,7 +755,7 @@ function roomMembers(room, now = Date.now()) {
         rooms.delete(room);
         return [];
     }
-    return [...members.values()].map(({ code, name, team, keyHash, publicId }) => ({ code, name, team, keyHash, publicId }));
+    return [...members.values()].map(({ at, ...member }) => member);
 }
 
 /** a room's player one never hears (its lines, so not as one to write to) */
@@ -774,8 +891,10 @@ async function pollChat(key, query) {
     if (room) {
         heard.push({ channel: 'match', room });
         if (team !== null) heard.push({ channel: 'team', room, team });
+        // (player: the name the game shows it by, its profile's; its rank and
+        // emblem for those in the room to show by that name)
         roomNote(room, account.code, playerName(account), team, Date.now(), account.keyHash,
-            account.publicId);
+            account.publicId, { player: account.name || null, ...personView(account) });
     }
     const messages = await collection(CHAT_MESSAGES);
     const unheard = await unheardOf(account);
@@ -1025,14 +1144,19 @@ async function getFriends(key) {
         .filter(([, other]) => other).map(([row, other]) => shape(row, other));
     const friendList = list(friends, (row, other) => ({
         code: idFor(other, account.keyHash), name: playerName(other), since: row.since || row.at,
+        ...personView(other),
         ...presenceView(other, { friend: true, now }),
     }));
     friendList.sort((one, other) => (other.online - one.online) || one.name.localeCompare(other.name));
     return {
         enabled: settingsOf(account).friends,
         friends: friendList,
-        incoming: list(incoming, (row, other) => ({ code: idFor(other, account.keyHash), name: playerName(other), at: row.at })),
-        outgoing: list(outgoing, (row, other) => ({ code: idFor(other, account.keyHash), name: playerName(other), at: row.at })),
+        incoming: list(incoming, (row, other) => ({
+            code: idFor(other, account.keyHash), name: playerName(other), at: row.at, ...personView(other),
+        })),
+        outgoing: list(outgoing, (row, other) => ({
+            code: idFor(other, account.keyHash), name: playerName(other), at: row.at, ...personView(other),
+        })),
     };
 }
 
@@ -1234,7 +1358,7 @@ async function moderate(key, body) {
 module.exports = {
     internals: {
         ACCOUNTS, ACCOUNT_MATCHES, CHAT_MESSAGES, CHAT_BURST, CHAT_REFILL_MS, ROOM_MEMBER_MS,
-        accountKey, hashKey, normalizeCode, newCode, newPublicId, idFor, accountQuery, parseMatch, matchIncrements, publicTotals, parseChatText,
+        accountKey, hashKey, normalizeCode, newCode, newPublicId, idFor, accountQuery, parseMatch, matchIncrements, parseFirefight, publicFirefight, parseEmblem, personView, publicTotals, parseChatText,
         parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms, REPORTED_HIDE_COUNT, ONLINE_MS, OFFLINE_GRACE_MS, POLLING_ONLINE_MS,
         accountOf, ownAccount, playerName, publicMessage, DISPLAY_NAME_MAX_LEN, NAME_CHANGE_MS, error, validationError, parseInteger, ACCOUNT_REPORTS, FRIENDSHIPS, MATCH_KINDS,
         parseSettings, settingsOf, unflatten, parsePresence, presenceView, pairKey, relationOf,
@@ -1243,6 +1367,9 @@ module.exports = {
     getAccount,
     changeCode,
     setAccountName,
+    setupAccount,
+    setEmblem,
+    setRank,
     submitMatch,
     getMatches,
     sendChat,

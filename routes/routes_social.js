@@ -5,6 +5,9 @@
  *
  *   POST /account                 the game started: the account, made the first time; {settings}
  *   GET  /account                 the account, its totals, medals and settings
+ *   POST /account/setup           {name, color, emblem} the player's first setup
+ *   POST /account/emblem          {emblem} its emblem changed
+ *   POST /account/rank            {xp, done} its rank raised; {reset: true} cleared, for testing
  *   POST /account/code            its friend code drawn anew (once a minute at most)
  *   POST /account/sync/code       {code?, skulls?} a sync code for another install, kept alive by asking again (45 seconds)
  *   POST /account/sync/cancel     its sync code no longer good
@@ -36,6 +39,9 @@ const {
     getAccount,
     changeCode,
     setAccountName,
+    setupAccount,
+    setEmblem,
+    setRank,
     submitMatch,
     getMatches,
     sendChat,
@@ -89,6 +95,12 @@ router.post('/account/code', respond('POST /account/code',
 router.post('/account/name', respond('POST /account/name',
     (req) => setAccountName(accountKey(req), req.body)));
 
+router.post('/account/setup', respond('POST /account/setup',
+    (req) => setupAccount(accountKey(req), req.body)));
+router.post('/account/emblem', respond('POST /account/emblem',
+    (req) => setEmblem(accountKey(req), req.body)));
+router.post('/account/rank', respond('POST /account/rank',
+    (req) => setRank(accountKey(req), req.body)));
 router.post('/account/sync/code', respond('POST /account/sync/code',
     (req) => createSyncCode(accountKey(req), req.body)));
 

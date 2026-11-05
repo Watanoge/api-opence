@@ -231,6 +231,45 @@ async function exercise(social) {
     assert.strictEqual((await social.sendChat(key('a'), { channel: 'private', to: codeThree, text: 'hi' })).error.type,
         'private_off');
 
+    // (rank and emblem: none on a new account, until its first setup)
+    const fresh = await social.hello(key('d'), { name: 'Four' });
+    assert.strictEqual(fresh.account.emblem, null);
+    assert.strictEqual(fresh.account.xp, null);
+    assert.strictEqual(fresh.account.rankDone, false);
+    const emblem = { foreground: 4, background: 1, primaryColor: 2, secondaryColor: 3, backgroundColor: 5, nameplate: 0, secondaryLayer: true };
+    assert.ok((await social.setupAccount(key('d'), { name: 'Fourth', emblem: null })).error);
+    const setUp = await social.setupAccount(key('d'), { name: 'Fourth', color: '5b8cff', emblem });
+    assert.strictEqual(setUp.account.displayName, 'Fourth');
+    assert.strictEqual(setUp.account.nameColor, '5b8cff');
+    assert.deepStrictEqual(setUp.account.emblem, emblem);
+    assert.strictEqual(setUp.account.xp, 0);
+    // (a colour taken back)
+    assert.strictEqual((await social.setupAccount(key('d'), { name: 'Fourth', color: '', emblem })).account.nameColor, null);
+    // (raised, never lowered; the catch-up said done)
+    assert.strictEqual((await social.hello(key('d'), { xp: 9000 })).account.xp, 9000);
+    assert.strictEqual((await social.hello(key('d'), { xp: 10 })).account.xp, 9000);
+    assert.strictEqual((await social.setRank(key('d'), { xp: 10, done: true })).account.xp, 9000);
+    assert.strictEqual((await social.setRank(key('d'), { xp: 12000, done: true })).account.rankDone, true);
+    const seen = await social.getPlayer(key('a'), (await social.getAccount(key('d'))).account.code);
+    assert.strictEqual(seen.player.xp, 12000);
+    assert.deepStrictEqual(seen.player.emblem, emblem);
+    assert.strictEqual(seen.player.rankDone, undefined);
+    // (the emblem changed; a bad one refused)
+    const other = { ...emblem, foreground: 7 };
+    assert.deepStrictEqual((await social.setEmblem(key('d'), { emblem: other })).account.emblem, other);
+    assert.ok((await social.setEmblem(key('d'), { emblem: { foreground: 999 } })).error);
+    // (the room's players carry them, by the name the game shows)
+    await social.pollChat(key('d'), { room: 'rankroom', name: 'Four' });
+    const members = (await social.pollChat(key('a'), { room: 'rankroom' })).members;
+    const member = members.find((row) => row.player === 'Four');
+    assert.strictEqual(member.xp, 12000);
+    assert.deepStrictEqual(member.emblem, other);
+    // (cleared, for testing: to be counted again)
+    const cleared = await social.setRank(key('d'), { reset: true });
+    assert.strictEqual(cleared.account.xp, 0);
+    assert.strictEqual(cleared.account.rankDone, false);
+    assert.deepStrictEqual(cleared.account.emblem, other);
+
     const { MongoClient } = require('mongodb');
     const client = await new MongoClient(process.env.MONGODB_URI).connect();
     await client.db('opence_test').dropDatabase();
