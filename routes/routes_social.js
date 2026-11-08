@@ -8,6 +8,7 @@
  *   POST /account/setup           {name, color, emblem} the player's first setup
  *   POST /account/emblem          {emblem} its emblem changed
  *   POST /account/rank            {xp, done} its rank raised; {reset: true} cleared, for testing
+ *   POST /account/creator         {seed?, add?} what it made: the counts on disk (the first time), or since
  *   POST /account/code            its friend code drawn anew (once a minute at most)
  *   POST /account/sync/code       {code?, skulls?} a sync code for another install, kept alive by asking again (45 seconds)
  *   POST /account/sync/cancel     its sync code no longer good
@@ -42,6 +43,7 @@ const {
     setupAccount,
     setEmblem,
     setRank,
+    addCreator,
     submitMatch,
     getMatches,
     sendChat,
@@ -101,6 +103,8 @@ router.post('/account/emblem', respond('POST /account/emblem',
     (req) => setEmblem(accountKey(req), req.body)));
 router.post('/account/rank', respond('POST /account/rank',
     (req) => setRank(accountKey(req), req.body)));
+router.post('/account/creator', respond('POST /account/creator',
+    (req) => addCreator(accountKey(req), req.body)));
 router.post('/account/sync/code', respond('POST /account/sync/code',
     (req) => createSyncCode(accountKey(req), req.body)));
 

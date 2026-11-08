@@ -22,7 +22,10 @@
  *   stats.firefight is the game's own career totals, as last sent with POST /account)
  *   and each medal's count (medals.<key>); its service rank (rank.xp, only
  *   ever raised but by a reset; rank.done: its past records were counted into
- *   it) and its emblem (emblem, none until the player chose one)
+ *   it) and its emblem (emblem, none until the player chose one); what it
+ *   made (creator: its time in Forge and in the Tag Injector's firing range,
+ *   the Forge maps and the tag profiles it made; none until the game first
+ *   counted what it had on disk: POST /account/creator's seed)
  * - account_matches: every match and level the game sent, as it came (a
  *   match sent twice, by its matchId, is taken once). A match left before
  *   its end (completed false) has no result and says why (endReason: quit,
@@ -75,6 +78,14 @@ const MATCH_KINDS = new Set(['multiplayer', 'campaign']);
 const XP_MAX = 2147483647;
 const EMBLEM_NUMBERS = ['foreground', 'background', 'primaryColor', 'secondaryColor', 'backgroundColor', 'nameplate'];
 const FIREFIGHT_FIELDS = ['matches', 'sets', 'waves', 'kills', 'bossKills', 'deaths', 'assists', 'bestSpree', 'score', 'seconds'];
+/** what an account made: seconds in Forge and in the firing range, Forge
+ * maps saved, and tag profiles (the Tag Injector's own, campaign and
+ * multiplayer ones) made */
+const CREATOR_FIELDS = ['forgeSeconds', 'rangeSeconds', 'forgeMaps', 'tagProfiles', 'campaignProfiles',
+    'multiplayerProfiles'];
+// (the most one POST /account/creator adds to a count: a week's seconds, a seed's counts more)
+const CREATOR_ADD_MAX = 7 * 24 * 3600;
+const CREATOR_SEED_MAX = 1000000;
 const MATCH_RESULTS = new Set(['win', 'loss', 'tie']);
 const MATCH_END_REASONS = new Set(['quit', 'ended', 'disconnected']);
 const MATCH_HISTORY_MAX = 50;
@@ -387,6 +398,28 @@ function publicFirefight(totals = {}) {
     return Object.fromEntries(FIREFIGHT_FIELDS.map((field) => [field, totals[field] || 0]));
 }
 
+/** a creator's counts as the game sends them ({ field: count }, those it
+ * has, at most `maximum` each): null for none, or any not a count */
+function parseCreator(value, maximum) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const counts = {};
+    for (const field of CREATOR_FIELDS) {
+        if (value[field] === undefined) continue;
+        counts[field] = parseInteger(value[field], 0, maximum);
+        if (counts[field] === null) return null;
+    }
+    return counts;
+}
+
+/** what an account made, as the game reads it (null: never counted) */
+function publicCreator(creator) {
+    if (!creator) return null;
+    return {
+        ...Object.fromEntries(CREATOR_FIELDS.map((field) => [field, creator[field] || 0])),
+        since: creator.since || null,
+    };
+}
+
 /** an emblem as the game sends it (indexes into its emblem tables): null for none, or any not one */
 function parseEmblem(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -418,6 +451,7 @@ function publicAccount(account, viewerHash = account.keyHash) {
             campaign: publicTotals(account.stats?.campaign),
             firefight: publicFirefight(account.stats?.firefight),
         },
+        creator: publicCreator(account.creator),
         medals: account.medals || {},
     };
 }
@@ -666,6 +700,43 @@ async function setRank(key, body) {
         });
     }
     return { account: ownAccount(await accounts.findOne({ keyHash: account.keyHash })) };
+}
+
+/**
+ * (POST /account/creator) what the account made: {seed} the counts the game
+ * found on disk, taken only by an account that has none yet (the first
+ * install to say them: what it made before this was counted); {add} what it
+ * made since, added (to the seed, when both come and the seed is taken)
+ */
+async function addCreator(key, body, now = new Date()) {
+    await ensureIndexes();
+    const parsedKey = accountKey(key);
+    if (!parsedKey) return error('unauthorized', 401);
+    const seed = body?.seed === undefined ? null : parseCreator(body.seed, CREATOR_SEED_MAX);
+    const add = body?.add === undefined ? null : parseCreator(body.add, CREATOR_ADD_MAX);
+    if ((body?.seed !== undefined && !seed) || (body?.add !== undefined && !add)) {
+        return validationError(['seed and add must be counts']);
+    }
+    if (!seed && !add) return validationError(['seed or add is required']);
+    const account = await accountOf(parsedKey);
+    const accounts = await collection(ACCOUNTS);
+    let seeded = false;
+    if (seed) {
+        const creator = { since: now };
+        for (const field of CREATOR_FIELDS) creator[field] = (seed[field] || 0) + (add?.[field] || 0);
+        const result = await accounts.updateOne({ keyHash: account.keyHash, creator: { $exists: false } },
+            { $set: { creator } });
+        seeded = result.modifiedCount > 0;
+    }
+    if (!seeded && add && Object.values(add).some((count) => count > 0)) {
+        // (an account never seeded starts counting here, with no seed)
+        await accounts.updateOne({ keyHash: account.keyHash, creator: { $exists: false } },
+            { $set: { 'creator.since': now } });
+        const increments = Object.fromEntries(Object.entries(add).filter(([, count]) => count > 0)
+            .map(([field, count]) => [`creator.${field}`, count]));
+        await accounts.updateOne({ keyHash: account.keyHash }, { $inc: increments });
+    }
+    return { account: ownAccount(await accounts.findOne({ keyHash: account.keyHash })), seeded };
 }
 
 async function submitMatch(key, body) {
@@ -1358,7 +1429,7 @@ async function moderate(key, body) {
 module.exports = {
     internals: {
         ACCOUNTS, ACCOUNT_MATCHES, CHAT_MESSAGES, CHAT_BURST, CHAT_REFILL_MS, ROOM_MEMBER_MS,
-        accountKey, hashKey, normalizeCode, newCode, newPublicId, idFor, accountQuery, parseMatch, matchIncrements, parseFirefight, publicFirefight, parseEmblem, personView, publicTotals, parseChatText,
+        accountKey, hashKey, normalizeCode, newCode, newPublicId, idFor, accountQuery, parseMatch, matchIncrements, parseFirefight, publicFirefight, parseCreator, publicCreator, CREATOR_FIELDS, parseEmblem, personView, publicTotals, parseChatText,
         parseRoom, chatRateTake, roomNote, roomMembers, chatRates, rooms, REPORTED_HIDE_COUNT, ONLINE_MS, OFFLINE_GRACE_MS, POLLING_ONLINE_MS,
         accountOf, ownAccount, playerName, publicMessage, DISPLAY_NAME_MAX_LEN, NAME_CHANGE_MS, error, validationError, parseInteger, ACCOUNT_REPORTS, FRIENDSHIPS, MATCH_KINDS,
         parseSettings, settingsOf, unflatten, parsePresence, presenceView, pairKey, relationOf,
@@ -1370,6 +1441,7 @@ module.exports = {
     setupAccount,
     setEmblem,
     setRank,
+    addCreator,
     submitMatch,
     getMatches,
     sendChat,

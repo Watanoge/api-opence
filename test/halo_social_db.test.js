@@ -270,6 +270,27 @@ async function exercise(social) {
     assert.strictEqual(cleared.account.rankDone, false);
     assert.deepStrictEqual(cleared.account.emblem, other);
 
+    // what it made: none until counted; the first seed taken (with what came
+    // with it), a later one not; adds counted; others see it
+    assert.strictEqual((await social.getAccount(key('d'))).account.creator, null);
+    const seeded = await social.addCreator(key('d'), { seed: { forgeMaps: 3, tagProfiles: 2 }, add: { forgeSeconds: 60 } });
+    assert.strictEqual(seeded.seeded, true);
+    assert.strictEqual(seeded.account.creator.forgeMaps, 3);
+    assert.strictEqual(seeded.account.creator.forgeSeconds, 60);
+    assert.ok(seeded.account.creator.since);
+    const again = await social.addCreator(key('d'), { seed: { forgeMaps: 9 }, add: { forgeMaps: 1, rangeSeconds: 30 } });
+    assert.strictEqual(again.seeded, false);
+    assert.strictEqual(again.account.creator.forgeMaps, 4);
+    assert.strictEqual(again.account.creator.rangeSeconds, 30);
+    assert.strictEqual(again.account.creator.multiplayerProfiles, 0);
+    assert.ok((await social.addCreator(key('d'), { add: { forgeSeconds: -1 } })).error);
+    assert.ok((await social.addCreator(key('d'), {})).error);
+    const maker = await social.getPlayer(key('a'), (await social.getAccount(key('d'))).account.code);
+    assert.strictEqual(maker.player.creator.tagProfiles, 2);
+    // (an add before any seed: counted from there, never seeded after)
+    assert.strictEqual((await social.addCreator(key('a'), { add: { campaignProfiles: 1 } })).account.creator.campaignProfiles, 1);
+    assert.strictEqual((await social.addCreator(key('a'), { seed: { campaignProfiles: 5 } })).seeded, false);
+
     const { MongoClient } = require('mongodb');
     const client = await new MongoClient(process.env.MONGODB_URI).connect();
     await client.db('opence_test').dropDatabase();
